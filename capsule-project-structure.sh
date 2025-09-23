@@ -145,7 +145,7 @@ This project automates the installation of Red Hat Satellite Capsule servers.
 
 ## Overview
 
-This automation picks up where the satellite-install-6_10 project leaves off, 
+This automation picks up where the satellite install project leaves off, 
 using the certificate tarballs and installation instructions that were 
 generated and distributed to install Capsule servers.
 
