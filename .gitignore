@@ -1,0 +1,41 @@
+# Ansible runtime and backup files
+*.retry
+*.orig
+*.tmp
+*.backup
+*~
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ansible vault password files
+.vault_pass
+vault_password_file
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local testing
+test/
+testing/
+scratch/
+
+# Credentials (should never be committed)
+credentials/
+*.pem
+*.key
+*.crt
+

@@ -1,0 +1,249 @@
+---
+# Role: install_capsule  
+# Purpose: Execute Capsule installation using parsed installer command
+# Monitors installation progress and verifies successful completion
+
+# ============================================================================
+# PHASE 1: PRE-INSTALLATION VERIFICATION
+# ============================================================================
+
+- name: Verify installer command is available
+  ansible.builtin.assert:
+    that:
+      - installer_command_final is defined
+      - installer_command_final | length > 0
+    fail_msg: "Installer command not available! The parse_install_instructions role must run first."
+    success_msg: "Installer command is ready"
+
+- name: Verify certificate tarball exists
+  ansible.builtin.stat:
+    path: "{{ capsule_cert_base_path }}/{{ inventory_hostname }}-certs.tar"
+  register: cert_tar
+
+- name: Validate certificate tarball
+  ansible.builtin.assert:
+    that:
+      - cert_tar.stat.exists
+      - cert_tar.stat.size > 0
+    fail_msg: "Certificate tarball not found or empty at {{ capsule_cert_base_path }}/{{ inventory_hostname }}-certs.tar"
+    success_msg: "Certificate tarball found: {{ cert_tar.stat.size }} bytes"
+
+# ============================================================================
+# PHASE 2: CREATE INSTALLATION LOG DIRECTORY
+# ============================================================================
+
+- name: Create installation log directory
+  ansible.builtin.file:
+    path: "{{ installation_log_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: save_installation_logs | bool
+
+- name: Set installation log file path
+  ansible.builtin.set_fact:
+    install_log_file: "{{ installation_log_path }}/capsule-installer-{{ inventory_hostname }}-{{ ansible_date_time.epoch }}.log"
+
+# ============================================================================
+# PHASE 3: EXECUTE CAPSULE INSTALLATION
+# ============================================================================
+
+- name: Display installation start message
+  ansible.builtin.debug:
+    msg:
+      - "================================================"
+      - "Starting Capsule Installation"
+      - "================================================"
+      - "Capsule: {{ inventory_hostname }}"
+      - "Type: {{ is_loadbalanced_capsule | ternary('Load-balanced', 'Standard') }}"
+      - "Timeout: {{ capsule_installer_timeout }} seconds"
+      - "Log file: {{ install_log_file }}"
+      - "================================================"
+      - "This may take 30-60 minutes to complete..."
+      - "================================================"
+
+- name: Execute satellite-installer for Capsule
+  ansible.builtin.shell: |
+    {{ installer_command_final }} 2>&1 | tee {{ install_log_file }}
+  register: installer_result
+  async: "{{ capsule_installer_timeout }}"
+  poll: 30  # Check every 30 seconds
+  environment:
+    LANG: en_US.UTF-8
+    LC_ALL: en_US.UTF-8
+
+- name: Check installer exit status
+  ansible.builtin.assert:
+    that:
+      - installer_result.rc == 0
+    fail_msg: |
+      Capsule installation failed!
+      Exit code: {{ installer_result.rc }}
+      Check the log file for details: {{ install_log_file }}
+      
+      Common issues:
+      1. Certificate problems - verify the certificate files are valid
+      2. OAuth key mismatch - ensure using correct instruction file
+      3. Network issues - check connectivity to Satellite
+      4. Resource constraints - verify sufficient CPU/memory
+    success_msg: "Capsule installer completed successfully"
+
+# ============================================================================
+# PHASE 4: VERIFY SERVICES ARE STARTING
+# ============================================================================
+
+- name: Wait for Capsule services to start
+  ansible.builtin.pause:
+    seconds: 30
+    prompt: "Waiting for services to initialize..."
+
+- name: Check critical Capsule services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  register: service_status
+  loop:
+    - foreman-proxy
+    - httpd
+    - pulpcore-api
+    - pulpcore-content
+    - pulpcore-worker@1
+  retries: 3
+  delay: 20
+
+- name: Report service status
+  ansible.builtin.debug:
+    msg: "Service {{ item.item }} is {{ item.status.ActiveState }}"
+  loop: "{{ service_status.results }}"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# PHASE 5: VERIFY CAPSULE IN SATELLITE
+# ============================================================================
+
+- name: Wait for Capsule to appear in Satellite
+  redhat.satellite.capsule_info:
+    server_url: "{{ satellite_server_url }}"
+    username: "{{ satellite_setup_username }}"
+    password: "{{ satellite_initial_admin_password }}"
+    name: "{{ inventory_hostname }}"
+    validate_certs: false
+  register: capsule_in_satellite
+  retries: "{{ capsule_health_check_retries }}"
+  delay: "{{ capsule_health_check_delay }}"
+  until: capsule_in_satellite is not failed
+
+- name: Display Capsule details from Satellite
+  ansible.builtin.debug:
+    msg:
+      - "Capsule registered in Satellite:"
+      - "  Name: {{ capsule_in_satellite.capsule.name | default('Unknown') }}"
+      - "  URL: {{ capsule_in_satellite.capsule.url | default('Unknown') }}"
+      - "  Features: {{ capsule_in_satellite.capsule.features | default([]) | join(', ') }}"
+  when: 
+    - capsule_debug_output | bool
+    - capsule_in_satellite.capsule is defined
+
+# ============================================================================
+# PHASE 6: TEST CAPSULE CONNECTIVITY
+# ============================================================================
+
+- name: Test Capsule API endpoint
+  ansible.builtin.uri:
+    url: "https://{{ inventory_hostname }}:9090/features"
+    method: GET
+    validate_certs: false
+    timeout: 30
+  register: capsule_api_test
+  retries: 3
+  delay: 10
+  until: capsule_api_test.status == 200
+
+- name: Report Capsule API status
+  ansible.builtin.debug:
+    msg: "Capsule API is responding: {{ capsule_api_test.status == 200 }}"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# PHASE 7: EXTRACT AND SAVE INSTALLATION SUMMARY
+# ============================================================================
+
+- name: Extract installation summary from log
+  ansible.builtin.shell: |
+    grep -A 20 "Success!" {{ install_log_file }} || tail -50 {{ install_log_file }}
+  register: install_summary
+  changed_when: false
+  when: save_installation_logs | bool
+
+- name: Save installation summary
+  ansible.builtin.copy:
+    content: |
+      Capsule Installation Summary
+      ============================
+      Date: {{ ansible_date_time.iso8601 }}
+      Capsule: {{ inventory_hostname }}
+      Satellite: {{ satellite_fqdn }}
+      Configuration: {{ is_loadbalanced_capsule | ternary('Load-balanced', 'Standard') }}
+      {% if is_loadbalanced_capsule %}
+      Load Balancer: {{ capsule_loadbalancer_fqdn }}
+      {% endif %}
+      
+      Installation Result: SUCCESS
+      Installation Time: {{ installer_result.delta | default('Unknown') }}
+      
+      Services Status:
+      {% for service in service_status.results %}
+      - {{ service.item }}: {{ service.status.ActiveState | default('Unknown') }}
+      {% endfor %}
+      
+      Capsule API: {{ capsule_api_test.status == 200 | ternary('Responding', 'Not responding') }}
+      
+      Features Enabled:
+      {% for feature in capsule_in_satellite.capsule.features | default([]) %}
+      - {{ feature }}
+      {% endfor %}
+      
+      Full log available at: {{ install_log_file }}
+    dest: "{{ installation_log_path }}/{{ inventory_hostname }}-installation-summary.txt"
+    mode: '0644'
+  when: save_installation_logs | bool
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+
+- name: Installation complete summary
+  ansible.builtin.debug:
+    msg:
+      - "================================================"
+      - "Capsule Installation Complete!"
+      - "================================================"
+      - "Capsule: {{ inventory_hostname }}"
+      - "Status: Successfully installed and verified"
+      - "Configuration: {{ is_loadbalanced_capsule | ternary('Load-balanced', 'Standard') }}"
+      - "{% if is_loadbalanced_capsule %}"
+      - "Load Balancer: {{ capsule_loadbalancer_fqdn }}"
+      - "{% endif %}"
+      - ""
+      - "Services Running:"
+      - "  - foreman-proxy: Active"
+      - "  - httpd: Active"  
+      - "  - pulpcore: Active"
+      - ""
+      - "Capsule Features:"
+      - "{% for feature in capsule_in_satellite.capsule.features | default([]) %}"
+      - "  - {{ feature }}"
+      - "{% endfor %}"
+      - ""
+      - "Next Steps:"
+      - "  1. Assign Capsule to appropriate locations in Satellite UI"
+      - "  2. Configure content synchronization from Satellite"
+      - "  3. Test remote execution through the Capsule"
+      - "  4. Configure any additional Capsule features as needed"
+      - "{% if is_loadbalanced_capsule %}"
+      - "  5. Add this Capsule to the load balancer pool"
+      - "  6. Test load balancer connectivity and failover"
+      - "{% endif %}"
+      - "================================================"

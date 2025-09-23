@@ -1,0 +1,30 @@
+---
+# Ansible Collections required for Red Hat Satellite Capsule Installation
+# These collections must be available in AAP
+
+collections:
+  # Red Hat Satellite Collection - Primary collection for Satellite operations
+  - name: redhat.satellite
+    version: ">=3.0.0"
+    
+  # Red Hat RHEL System Roles - For system configuration tasks
+  - name: redhat.rhel_system_roles
+    version: ">=1.20.0"
+    
+  # Ansible POSIX - For system operations
+  - name: ansible.posix
+    version: ">=1.5.0"
+    
+  # Community General - For additional modules
+  - name: community.general
+    version: ">=6.0.0"
+
+# Installation Instructions:
+# 1. In AAP: Collections are typically pre-installed in Execution Environments
+# 2. For local development: ansible-galaxy collection install -r collections/requirements.yml
+# 3. Verify collections: ansible-galaxy collection list
+
+# Notes:
+# - redhat.satellite collection is REQUIRED for all Capsule registration operations
+# - redhat.satellite_operations is NOT needed for Capsule installation (only for Satellite)
+# - All API operations must use redhat.satellite collection modules

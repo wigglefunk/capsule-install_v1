@@ -1,0 +1,151 @@
+---
+# Role: configure_capsule_repos
+# Purpose: Configure required repositories for Capsule installation
+# Disables all repos then enables only the specific Capsule repos needed
+
+# ============================================================================
+# PHASE 1: CHECK CURRENT REPOSITORY STATUS
+# ============================================================================
+
+- name: List currently enabled repositories
+  ansible.builtin.command: subscription-manager repos --list-enabled
+  register: current_repos
+  changed_when: false
+
+- name: Display current repository status
+  ansible.builtin.debug:
+    msg: "Currently enabled repos: {{ current_repos.stdout_lines | select('match', '^Repo ID:') | list | length }} repositories"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# PHASE 2: DISABLE ALL REPOSITORIES
+# ============================================================================
+
+- name: Disable all repositories
+  ansible.builtin.command: subscription-manager repos --disable="*"
+  register: disable_all
+  changed_when: "'Repo .* is disabled' in disable_all.stdout"
+
+- name: Report repository reset
+  ansible.builtin.debug:
+    msg: "All repositories have been disabled"
+  when: 
+    - capsule_debug_output | bool
+    - disable_all is changed
+
+# ============================================================================
+# PHASE 3: ENABLE REQUIRED CAPSULE REPOSITORIES
+# ============================================================================
+
+- name: Enable Capsule-specific repositories
+  community.general.rhsm_repository:
+    name: "{{ capsule_repos_to_enable }}"
+    state: enabled
+  register: repos_enabled
+
+- name: Report repository enablement
+  ansible.builtin.debug:
+    msg: "Enabled {{ repos_enabled.repositories | default([]) | length }} repositories"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# PHASE 4: VERIFY REPOSITORY AVAILABILITY
+# ============================================================================
+
+- name: Verify all required repositories are enabled
+  ansible.builtin.command: subscription-manager repos --list-enabled
+  register: final_repos
+  changed_when: false
+
+- name: Parse enabled repository IDs
+  ansible.builtin.set_fact:
+    enabled_repo_ids: "{{ final_repos.stdout | regex_findall('Repo ID:\\s+(.+)') }}"
+
+- name: Check each required repository is enabled
+  ansible.builtin.assert:
+    that:
+      - item in enabled_repo_ids
+    fail_msg: "Required repository '{{ item }}' is not enabled!"
+    success_msg: "Repository '{{ item }}' is enabled"
+  loop: "{{ capsule_repos_to_enable }}"
+
+# ============================================================================
+# PHASE 5: CLEAN AND UPDATE REPOSITORY METADATA
+# ============================================================================
+
+- name: Clean repository metadata
+  ansible.builtin.command: dnf clean all
+  changed_when: true
+
+- name: Make DNF cache for enabled repos
+  ansible.builtin.command: dnf makecache
+  register: makecache_result
+  changed_when: true
+
+# ============================================================================
+# PHASE 6: VERIFY CAPSULE PACKAGE AVAILABILITY
+# ============================================================================
+
+- name: Check if satellite-capsule package is available
+  ansible.builtin.command: dnf info satellite-capsule
+  register: capsule_package_check
+  changed_when: false
+  failed_when: false
+
+- name: Verify Capsule package is available from repos
+  ansible.builtin.assert:
+    that:
+      - capsule_package_check.rc == 0
+    fail_msg: |
+      The satellite-capsule package is not available!
+      This usually means:
+      1. The activation key doesn't have the correct content view
+      2. The Capsule repositories aren't synced in Satellite
+      3. The subscription doesn't include Capsule entitlements
+      
+      Please verify the activation key '{{ capsule_activation_key }}' configuration.
+    success_msg: "satellite-capsule package is available from configured repositories"
+
+- name: Display available Capsule package version
+  ansible.builtin.debug:
+    msg: "Available satellite-capsule version: {{ capsule_package_check.stdout | regex_search('Version\\s+:\\s+(.+)', '\\1') | first | default('Unknown') }}"
+  when: 
+    - capsule_debug_output | bool
+    - capsule_package_check.rc == 0
+
+# ============================================================================
+# PHASE 7: INSTALL FAILSAFE PACKAGES
+# ============================================================================
+
+- name: Ensure required packages are installed (failsafe)
+  ansible.builtin.dnf:
+    name: "{{ capsule_required_packages }}"
+    state: present
+  register: package_install
+  when: capsule_required_packages is defined
+
+- name: Report package installation
+  ansible.builtin.debug:
+    msg: "Package verification: {{ package_install.changed | default(false) | ternary('Some packages were installed', 'All packages already present') }}"
+  when: 
+    - capsule_debug_output | bool
+    - package_install is defined
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+
+- name: Repository configuration summary
+  ansible.builtin.debug:
+    msg:
+      - "================================================"
+      - "Repository Configuration Complete"
+      - "================================================"
+      - "Total repos enabled: {{ enabled_repo_ids | length }}"
+      - "Enabled repositories:"
+      - "{% for repo in enabled_repo_ids %}  - {{ repo }}{% endfor %}"
+      - "Capsule package: Available"
+      - "Repository cache: Updated"
+      - "Ready for: Capsule installation"
+      - "================================================"
+  when: capsule_debug_output | bool

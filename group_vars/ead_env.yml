@@ -1,0 +1,47 @@
+---
+# EAD Environment Variables for Capsule Installation
+# Overrides values from all.yml for EAD environment
+
+# ============================================================================
+# SATELLITE CONFIGURATION (EAD Environment)
+# ============================================================================
+
+# EAD Satellite Server
+satellite_fqdn: "satellite-ead.example.com"
+satellite_shortname: "satellite-ead"
+satellite_server_url: "https://{{ satellite_fqdn }}"
+
+# ============================================================================
+# CAPSULE CONFIGURATION (EAD Environment)
+# ============================================================================
+
+# EAD environment currently has no Capsules defined
+# Update this list when Capsules are added to EAD
+capsule_fqdns: []
+
+# No load balancer in EAD environment
+loadbalanced_capsules: []
+capsule_loadbalancer_fqdn: ""
+
+# ============================================================================
+# EAD-SPECIFIC SETTINGS
+# ============================================================================
+
+# Standard settings for EAD
+capsule_debug_output: false
+
+# Standard timeouts
+capsule_installer_timeout: 3600        # 1 hour
+capsule_service_start_timeout: 300     # 5 minutes
+
+# Verification settings
+verify_capsule_after_install: true
+capsule_health_check_retries: 3
+capsule_health_check_delay: 30
+
+# ============================================================================
+# EAD NOTES
+# ============================================================================
+# - EAD environment currently has no Capsules configured
+# - Update capsule_fqdns when Capsules are added to this environment
+# - This file is a placeholder for future EAD Capsule deployments

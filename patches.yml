@@ -1,0 +1,17 @@
+# Base Capsule post configuration
+# This sets up EO_ITRA in Satellite
+- name: "Create Smart Proxy"
+  redhat.satellite.smart_proxy:
+    username: "{{ satellite_setup_username }}"
+    password: "{{ satellite_initial_admin_password }}"
+    server_url: "https://{{ satellite_fqdn }}"
+    name: "{{ ansible_fqdn }}"
+    url: "https://{{ ansible_fqdn }}:9090"
+    download_policy: "immediate"
+    lifecycle_environments:
+      - "Development"
+    organizations:
+      - "Default Organization"
+    locations:
+      - "Default Location"
+    state: present

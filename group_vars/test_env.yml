@@ -1,0 +1,41 @@
+---
+# Test Environment Variables for Capsule Installation
+# Overrides values from all.yml for test environment
+
+# ============================================================================
+# SATELLITE CONFIGURATION (Test Environment)
+# ============================================================================
+
+# Test Satellite Server
+satellite_fqdn: "testsatellite.example.com"
+satellite_shortname: "testsatellite"
+satellite_server_url: "https://{{ satellite_fqdn }}"
+
+# ============================================================================
+# CAPSULE CONFIGURATION (Test Environment)
+# ============================================================================
+
+# Test Capsules
+capsule_fqdns:
+  - testcapsule1.example.com
+  - testcapsule2.example.com
+
+# No load balancer in test environment
+loadbalanced_capsules: []
+capsule_loadbalancer_fqdn: ""
+
+# ============================================================================
+# TEST-SPECIFIC SETTINGS
+# ============================================================================
+
+# More verbose output for testing
+capsule_debug_output: true
+
+# Shorter timeouts for faster testing feedback
+capsule_installer_timeout: 2400        # 40 minutes for test
+capsule_service_start_timeout: 180     # 3 minutes for test
+
+# Additional verification in test
+verify_capsule_after_install: true
+capsule_health_check_retries: 5        # More retries in test
+capsule_health_check_delay: 20         # Shorter delay between retries

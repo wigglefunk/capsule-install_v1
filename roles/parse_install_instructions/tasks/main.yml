@@ -1,0 +1,195 @@
+---
+# Role: parse_install_instructions
+# Purpose: Extract and prepare installation command from generated instruction files
+# Handles both standard and load-balanced Capsule configurations
+
+# ============================================================================
+# PHASE 1: VERIFY INSTRUCTION FILE EXISTS
+# ============================================================================
+
+- name: Define instruction file path
+  ansible.builtin.set_fact:
+    instruction_file_path: "{{ capsule_cert_base_path }}/{{ inventory_hostname }}-install.txt"
+
+- name: Verify instruction file exists
+  ansible.builtin.stat:
+    path: "{{ instruction_file_path }}"
+  register: instruction_file
+
+- name: Validate instruction file is present
+  ansible.builtin.assert:
+    that:
+      - instruction_file.stat.exists
+      - instruction_file.stat.size > 0
+    fail_msg: |
+      Installation instruction file not found or empty!
+      Expected: {{ instruction_file_path }}
+      This file should have been created by the satellite-install project.
+    success_msg: "Installation instructions found: {{ instruction_file_path }}"
+
+# ============================================================================
+# PHASE 2: READ AND PARSE INSTRUCTION FILE
+# ============================================================================
+
+- name: Read installation instruction file
+  ansible.builtin.slurp:
+    src: "{{ instruction_file_path }}"
+  register: instruction_content
+
+- name: Decode instruction content
+  ansible.builtin.set_fact:
+    instruction_text: "{{ instruction_content.content | b64decode }}"
+
+- name: Display instruction file header
+  ansible.builtin.debug:
+    msg: "Reading installation instructions for {{ inventory_hostname }}"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# PHASE 3: EXTRACT SATELLITE-INSTALLER COMMAND
+# ============================================================================
+
+# The installer command starts with "satellite-installer" and continues until we hit
+# either the end of the command or the start of the load balancer instructions
+- name: Extract satellite-installer command from instructions
+  ansible.builtin.set_fact:
+    installer_command_raw: "{{ instruction_text | regex_search('(satellite-installer[\\s\\S]*?)(?:====|LOAD BALANCER|STANDARD CAPSULE|$)', '\\1') | first }}"
+
+- name: Clean up installer command (remove excess whitespace and backslashes)
+  ansible.builtin.set_fact:
+    installer_command_cleaned: "{{ installer_command_raw | regex_replace('\\\\\\n', ' ') | regex_replace('\\s+', ' ') | trim }}"
+
+- name: Verify installer command was extracted
+  ansible.builtin.assert:
+    that:
+      - installer_command_cleaned is defined
+      - installer_command_cleaned | length > 0
+      - "'satellite-installer' in installer_command_cleaned"
+    fail_msg: "Failed to extract satellite-installer command from instruction file!"
+    success_msg: "Successfully extracted installer command"
+
+# ============================================================================
+# PHASE 4: DETECT LOAD BALANCER CONFIGURATION
+# ============================================================================
+
+- name: Check if this is a load-balanced Capsule configuration
+  ansible.builtin.set_fact:
+    is_loadbalanced_from_file: "{{ 'LOAD BALANCER CONFIGURATION REQUIRED' in instruction_text }}"
+
+- name: Verify load balancer detection matches configuration
+  ansible.builtin.assert:
+    that:
+      - is_loadbalanced_from_file == is_loadbalanced_capsule
+    fail_msg: |
+      Load balancer configuration mismatch!
+      Instruction file indicates: {{ is_loadbalanced_from_file | ternary('Load-balanced', 'Standard') }}
+      Group vars indicate: {{ is_loadbalanced_capsule | ternary('Load-balanced', 'Standard') }}
+      Please verify the configuration is correct.
+    success_msg: "Load balancer configuration verified: {{ is_loadbalanced_capsule | ternary('Load-balanced', 'Standard') }}"
+
+# ============================================================================
+# PHASE 5: APPEND LOAD BALANCER OPTIONS IF NEEDED
+# ============================================================================
+
+- name: Build load balancer options for load-balanced Capsule
+  when: is_loadbalanced_capsule
+  block:
+    - name: Extract load balancer FQDN from instructions (as verification)
+      ansible.builtin.set_fact:
+        lb_fqdn_from_file: "{{ instruction_text | regex_search('Load Balancer FQDN: (.+)', '\\1') | first | default('') }}"
+    
+    - name: Verify load balancer FQDN matches configuration
+      ansible.builtin.assert:
+        that:
+          - lb_fqdn_from_file == capsule_loadbalancer_fqdn or lb_fqdn_from_file == ''
+        fail_msg: |
+          Load balancer FQDN mismatch!
+          Instruction file: {{ lb_fqdn_from_file }}
+          Configuration: {{ capsule_loadbalancer_fqdn }}
+      when: lb_fqdn_from_file != ''
+    
+    - name: Append load balancer options to installer command
+      ansible.builtin.set_fact:
+        installer_command_final: >-
+          {{ installer_command_cleaned }}
+          --certs-cname "{{ capsule_loadbalancer_fqdn }}"
+          --enable-foreman-proxy-plugin-remote-execution-script
+
+- name: Set final installer command for standard Capsule
+  ansible.builtin.set_fact:
+    installer_command_final: "{{ installer_command_cleaned }}"
+  when: not is_loadbalanced_capsule
+
+# ============================================================================
+# PHASE 6: VALIDATE INSTALLER COMMAND
+# ============================================================================
+
+- name: Verify installer command contains required components
+  ansible.builtin.assert:
+    that:
+      - "'--scenario capsule' in installer_command_final"
+      - "'--certs-tar' in installer_command_final"
+      - "'--foreman-proxy-oauth-consumer-key' in installer_command_final"
+      - "'--foreman-proxy-oauth-consumer-secret' in installer_command_final"
+    fail_msg: "Installer command is missing required parameters!"
+    success_msg: "Installer command contains all required parameters"
+
+- name: Check for load balancer parameters in final command
+  ansible.builtin.assert:
+    that:
+      - "'--certs-cname' in installer_command_final"
+      - "'--enable-foreman-proxy-plugin-remote-execution-script' in installer_command_final"
+    fail_msg: "Load balancer parameters missing from installer command!"
+    success_msg: "Load balancer parameters included in installer command"
+  when: is_loadbalanced_capsule
+
+# ============================================================================
+# PHASE 7: SAVE PARSED COMMAND
+# ============================================================================
+
+- name: Save parsed installer command to file
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      # Parsed Capsule Installation Command
+      # Generated: {{ ansible_date_time.iso8601 }}
+      # Capsule: {{ inventory_hostname }}
+      # Configuration: {{ is_loadbalanced_capsule | ternary('Load-balanced', 'Standard') }}
+      {% if is_loadbalanced_capsule %}
+      # Load Balancer: {{ capsule_loadbalancer_fqdn }}
+      {% endif %}
+      
+      # The following command will install the Capsule:
+      {{ installer_command_final }}
+    dest: "{{ capsule_cert_base_path }}/{{ inventory_hostname }}-parsed-installer.sh"
+    mode: '0700'
+    owner: root
+    group: root
+    backup: yes
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+
+- name: Parsing summary
+  ansible.builtin.debug:
+    msg:
+      - "================================================"
+      - "Installation Instructions Parsed"
+      - "================================================"
+      - "Capsule: {{ inventory_hostname }}"
+      - "Configuration Type: {{ is_loadbalanced_capsule | ternary('Load-balanced', 'Standard') }}"
+      - "{% if is_loadbalanced_capsule %}"
+      - "Load Balancer: {{ capsule_loadbalancer_fqdn }}"
+      - "Additional Options: Added for load balancer"
+      - "{% endif %}"
+      - "Installer command: Parsed and ready"
+      - "Command saved to: {{ capsule_cert_base_path }}/{{ inventory_hostname }}-parsed-installer.sh"
+      - "Ready for: Capsule installation"
+      - "================================================"
+  when: capsule_debug_output | bool
+
+- name: Display parsed installer command (verbose mode)
+  ansible.builtin.debug:
+    msg: "Installer command: {{ installer_command_final }}"
+  when: capsule_debug_output | bool

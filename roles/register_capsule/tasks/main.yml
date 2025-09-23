@@ -1,0 +1,200 @@
+---
+# Role: register_capsule
+# Purpose: Register Capsule to Satellite using activation key
+# Uses redhat.satellite collection to generate and execute registration
+
+# ============================================================================
+# PHASE 1: VERIFY CONNECTIVITY TO SATELLITE
+# ============================================================================
+
+- name: Test connectivity to Satellite server
+  ansible.builtin.uri:
+    url: "{{ satellite_server_url }}/api/status"
+    method: GET
+    validate_certs: false
+    timeout: 30
+  register: satellite_connectivity
+  failed_when: false
+
+- name: Verify Satellite is accessible
+  ansible.builtin.assert:
+    that:
+      - satellite_connectivity.status == 200
+    fail_msg: |
+      Cannot connect to Satellite server at {{ satellite_server_url }}
+      Please verify:
+      1. Network connectivity to Satellite
+      2. Satellite services are running
+      3. No firewall blocking access
+    success_msg: "Satellite server is accessible"
+
+# ============================================================================
+# PHASE 2: GENERATE REGISTRATION COMMAND
+# ============================================================================
+
+- name: Generate registration command using redhat.satellite collection
+  redhat.satellite.registration_command:
+    server_url: "{{ satellite_server_url }}"
+    username: "{{ satellite_setup_username }}"
+    password: "{{ satellite_initial_admin_password }}"
+    organization: "{{ satellite_org }}"
+    location: "{{ satellite_location }}"
+    activation_keys:
+      - "{{ capsule_activation_key }}"
+    insecure: true  # Required for initial registration before certs are fully configured
+    force: "{{ capsule_force_registration }}"
+    setup_insights: "{{ capsule_setup_insights }}"
+    setup_remote_execution: "{{ capsule_enable_remote_execution }}"
+    setup_remote_execution_pull: false  # Standard push-based remote execution
+    update_packages: false  # Packages already updated by satellite-install project
+  register: registration_command
+
+- name: Display registration command details
+  ansible.builtin.debug:
+    msg:
+      - "Registration command generated successfully"
+      - "Organization: {{ satellite_org }}"
+      - "Activation Key: {{ capsule_activation_key }}"
+      - "Remote Execution: {{ capsule_enable_remote_execution | ternary('Enabled', 'Disabled') }}"
+      - "Insights: {{ capsule_setup_insights | ternary('Enabled', 'Disabled') }}"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# PHASE 3: EXECUTE REGISTRATION
+# ============================================================================
+
+- name: Create registration script
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      # Capsule Registration Script
+      # Generated: {{ ansible_date_time.iso8601 }}
+      # Target Satellite: {{ satellite_fqdn }}
+      
+      set -e  # Exit on any error
+      
+      echo "Starting registration to Satellite: {{ satellite_fqdn }}"
+      
+      # Execute registration command
+      {{ registration_command.registration_command }}
+      
+      # Verify registration succeeded
+      if subscription-manager identity &>/dev/null; then
+          echo "Registration successful!"
+          exit 0
+      else
+          echo "Registration may have failed - please verify"
+          exit 1
+      fi
+    dest: /tmp/capsule_registration.sh
+    mode: '0700'
+    owner: root
+    group: root
+
+- name: Execute registration script
+  ansible.builtin.script: /tmp/capsule_registration.sh
+  register: registration_result
+  async: "{{ registration_timeout }}"
+  poll: 15
+
+- name: Clean up registration script
+  ansible.builtin.file:
+    path: /tmp/capsule_registration.sh
+    state: absent
+
+# ============================================================================
+# PHASE 4: VERIFY REGISTRATION
+# ============================================================================
+
+- name: Verify registration with subscription-manager
+  ansible.builtin.command: subscription-manager identity
+  register: identity_check
+  changed_when: false
+
+- name: Parse registration details
+  ansible.builtin.set_fact:
+    registered_org: "{{ identity_check.stdout | regex_search('org name: (.+)', '\\1') | first | default('Unknown') }}"
+    registered_env: "{{ identity_check.stdout | regex_search('environment name: (.+)', '\\1') | first | default('Unknown') }}"
+
+- name: Verify correct organization
+  ansible.builtin.assert:
+    that:
+      - "satellite_org in registered_org"
+    fail_msg: "Registered to wrong organization! Expected: {{ satellite_org }}, Got: {{ registered_org }}"
+    success_msg: "Successfully registered to {{ satellite_org }}"
+
+# ============================================================================
+# PHASE 5: VERIFY IN SATELLITE API
+# ============================================================================
+
+- name: Verify host appears in Satellite
+  redhat.satellite.host_info:
+    server_url: "{{ satellite_server_url }}"
+    username: "{{ satellite_setup_username }}"
+    password: "{{ satellite_initial_admin_password }}"
+    name: "{{ inventory_hostname }}"
+    validate_certs: false
+  register: host_in_satellite
+  retries: 3
+  delay: 10
+  until: host_in_satellite is not failed
+
+- name: Display host details from Satellite
+  ansible.builtin.debug:
+    msg:
+      - "Host found in Satellite:"
+      - "  Name: {{ host_in_satellite.host.name | default('Unknown') }}"
+      - "  Organization: {{ host_in_satellite.host.organization | default('Unknown') }}"
+      - "  Location: {{ host_in_satellite.host.location | default('Unknown') }}"
+      - "  Content View: {{ host_in_satellite.host.content_facet_attributes.content_view.name | default('Unknown') }}"
+  when: 
+    - capsule_debug_output | bool
+    - host_in_satellite.host is defined
+
+# ============================================================================
+# PHASE 6: VERIFY REMOTE EXECUTION SETUP
+# ============================================================================
+
+- name: Check remote execution SSH key deployment
+  ansible.builtin.stat:
+    path: /root/.ssh/authorized_keys
+  register: ssh_keys
+  when: capsule_enable_remote_execution | bool
+
+- name: Verify Satellite remote execution key is present
+  ansible.builtin.shell: |
+    grep -q "foreman-proxy@{{ satellite_fqdn }}" /root/.ssh/authorized_keys || \
+    grep -q "satellite-remote-execution" /root/.ssh/authorized_keys
+  register: rex_key_check
+  changed_when: false
+  failed_when: false
+  when: 
+    - capsule_enable_remote_execution | bool
+    - ssh_keys.stat.exists
+
+- name: Report remote execution setup status
+  ansible.builtin.debug:
+    msg: "Remote Execution: {{ rex_key_check.rc == 0 | ternary('SSH key deployed', 'SSH key not found - may need manual setup') }}"
+  when:
+    - capsule_enable_remote_execution | bool
+    - capsule_debug_output | bool
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+
+- name: Registration summary
+  ansible.builtin.debug:
+    msg:
+      - "================================================"
+      - "Capsule Registration Complete"
+      - "================================================"
+      - "Capsule FQDN: {{ inventory_hostname }}"
+      - "Satellite: {{ satellite_fqdn }}"
+      - "Organization: {{ registered_org }}"
+      - "Environment: {{ registered_env }}"
+      - "Activation Key: {{ capsule_activation_key }}"
+      - "Remote Execution: {{ capsule_enable_remote_execution | ternary('Enabled', 'Disabled') }}"
+      - "Insights: {{ capsule_setup_insights | ternary('Enabled', 'Disabled') }}"
+      - "Status: Successfully registered"
+      - "================================================"

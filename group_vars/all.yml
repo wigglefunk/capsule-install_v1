@@ -1,0 +1,132 @@
+---
+# Default Group Variables for Capsule Installation
+# Development Environment Configuration
+# These variables are reused from satellite-install project where applicable
+
+# ============================================================================
+# SATELLITE CONFIGURATION (Reused from satellite-install)
+# ============================================================================
+
+# Satellite Server Configuration
+sat_version: "6.17"
+satellite_fqdn: "devsatellite.example.com"
+satellite_shortname: "devsatellite"
+satellite_server_url: "https://{{ satellite_fqdn }}"
+
+# Credentials (from AAP - standard across ALL environments)
+# These are used for ALL redhat.satellite collection authentication
+satellite_setup_username: "{{ app_username }}"     # From AAP credential
+satellite_initial_admin_password: "{{ app_password }}"  # From AAP credential
+
+# Organization and Location
+satellite_org: "EO_ITRA"
+satellite_location: "default_location"
+
+# Python interpreter (ensure consistency)
+ansible_python_interpreter: /usr/bin/python3
+
+# ============================================================================
+# CAPSULE CONFIGURATION
+# ============================================================================
+
+# Capsule version (future-proofing)
+cap_version: "6.17"
+
+# Hosts that are Capsules (exact FQDNs)
+capsule_fqdns:
+  - devcapsule.example.com
+
+# Load Balancer Configuration
+# List which Capsules will be behind a load balancer (if any)
+loadbalanced_capsules: []
+
+# The load balancer FQDN (only required if loadbalanced_capsules has entries)
+capsule_loadbalancer_fqdn: ""
+
+# ============================================================================
+# CAPSULE REGISTRATION SETTINGS
+# ============================================================================
+
+# Activation key for Capsule registration
+# This key must exist in Satellite with appropriate content view
+capsule_activation_key: "satellite-infrastructure"
+
+# Registration options
+capsule_force_registration: true        # Override existing registration
+capsule_enable_remote_execution: true   # Always enable remote execution
+capsule_setup_insights: false          # Never enable insights
+
+# Registration command timeout
+registration_timeout: 300  # 5 minutes
+
+# ============================================================================
+# REPOSITORY CONFIGURATION
+# ============================================================================
+
+# Capsule-specific repositories to enable after registration
+# Using cap_version for future-proofing
+capsule_repos_to_enable:
+  - "rhel-{{ rhel_major_version }}-for-x86_64-baseos-rpms"
+  - "rhel-{{ rhel_major_version }}-for-x86_64-appstream-rpms"
+  - "satellite-capsule-{{ cap_version }}-for-rhel-{{ rhel_major_version }}-x86_64-rpms"
+  - "satellite-maintenance-{{ cap_version }}-for-rhel-{{ rhel_major_version }}-x86_64-rpms"
+
+# ============================================================================
+# INSTALLATION SETTINGS
+# ============================================================================
+
+# Installation control
+capsule_installer_timeout: 3600        # 1 hour for installer to complete
+capsule_service_start_timeout: 300     # 5 minutes for services to start
+force_reinstall: false                  # Skip if already installed unless true
+
+# Certificate and instruction file paths (from satellite-install distribution)
+capsule_cert_base_path: "/root/capsule_cert"
+
+# ============================================================================
+# SYSTEM CONFIGURATION
+# ============================================================================
+
+# DNS Configuration
+validate_dns: true
+dns_timeout: 20
+
+# Package cleanup
+remove_katello_ca_consumer: true  # Clean old katello packages before registration
+
+# Verification settings
+verify_capsule_after_install: true
+capsule_health_check_retries: 3
+capsule_health_check_delay: 30
+
+# ============================================================================
+# PACKAGE REQUIREMENTS
+# ============================================================================
+
+# Required packages for Capsule operation
+capsule_required_packages:
+  - satellite-capsule
+  - chrony
+  - sos
+  - tmux
+  - bash-completion
+  - tree
+  - yum-utils
+  - dnf-utils
+
+# ============================================================================
+# DEBUG AND LOGGING
+# ============================================================================
+
+# Debug output control
+capsule_debug_output: true
+save_installation_logs: true
+installation_log_path: "/var/log/capsule-installation"
+
+# ============================================================================
+# NOTES
+# ============================================================================
+# - All Capsules have direct network access to Satellite (no proxy for registration)
+# - The activation key must exist and be properly configured before running
+# - Certificate files must be distributed by satellite-install project
+# - Storage volumes should already be configured from satellite-install project

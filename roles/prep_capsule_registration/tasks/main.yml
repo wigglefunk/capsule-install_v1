@@ -1,0 +1,188 @@
+---
+# Role: prep_capsule_registration
+# Purpose: Clean existing registrations and prepare for new registration
+# This role ensures a clean state before registering to Satellite
+
+# ============================================================================
+# PHASE 1: CHECK CURRENT REGISTRATION STATUS
+# ============================================================================
+
+- name: Check current registration status using subscription-manager
+  ansible.builtin.command: subscription-manager identity
+  register: sub_identity
+  changed_when: false
+  failed_when: false
+
+- name: Determine if system is currently registered
+  ansible.builtin.set_fact:
+    system_is_registered: "{{ sub_identity.rc == 0 }}"
+    
+- name: Display current registration status
+  ansible.builtin.debug:
+    msg:
+      - "Current registration status: {{ system_is_registered | ternary('REGISTERED', 'NOT REGISTERED') }}"
+      - "{% if system_is_registered %}Current identity: {{ sub_identity.stdout_lines[0] | default('Unknown') }}{% endif %}"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# PHASE 2: CLEAN EXISTING REGISTRATIONS
+# ============================================================================
+
+- name: Clean existing registration if present
+  when: system_is_registered
+  block:
+    - name: Unregister from current subscription service
+      ansible.builtin.command: subscription-manager unregister
+      register: unregister_result
+      
+    - name: Report unregistration
+      ansible.builtin.debug:
+        msg: "Successfully unregistered from previous subscription service"
+      when: capsule_debug_output | bool
+
+- name: Clean subscription-manager cache
+  ansible.builtin.command: subscription-manager clean
+  changed_when: true
+
+# ============================================================================
+# PHASE 3: REMOVE OLD KATELLO-CA-CONSUMER PACKAGES
+# ============================================================================
+
+- name: Check for existing katello-ca-consumer packages
+  ansible.builtin.shell: |
+    rpm -qa | grep -i katello-ca-consumer || true
+  register: katello_packages
+  changed_when: false
+
+- name: Remove old katello-ca-consumer packages if present
+  ansible.builtin.dnf:
+    name: "katello-ca-consumer*"
+    state: absent
+  when: 
+    - katello_packages.stdout | length > 0
+    - remove_katello_ca_consumer | bool
+
+- name: Report katello package cleanup
+  ansible.builtin.debug:
+    msg: "{{ katello_packages.stdout | length > 0 | ternary('Removed old katello-ca-consumer packages', 'No katello packages found to remove') }}"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# PHASE 4: CLEAN RHSM CONFIGURATION
+# ============================================================================
+
+- name: Check if rhsm.conf exists
+  ansible.builtin.stat:
+    path: /etc/rhsm/rhsm.conf
+  register: rhsm_conf_stat
+
+- name: Backup current rhsm.conf
+  ansible.builtin.copy:
+    src: /etc/rhsm/rhsm.conf
+    dest: "/etc/rhsm/rhsm.conf.backup.{{ ansible_date_time.epoch }}"
+    remote_src: yes
+    mode: '0644'
+    owner: root
+    group: root
+  when: rhsm_conf_stat.stat.exists
+
+# Reset RHSM configuration to defaults (no proxy for Capsule registration)
+- name: Remove proxy configuration from rhsm.conf
+  ansible.builtin.ini_file:
+    path: /etc/rhsm/rhsm.conf
+    section: server
+    option: "{{ item }}"
+    state: absent
+  loop:
+    - proxy_hostname
+    - proxy_port
+    - proxy_user
+    - proxy_password
+  when: rhsm_conf_stat.stat.exists
+
+- name: Clear any CDN configuration
+  ansible.builtin.ini_file:
+    path: /etc/rhsm/rhsm.conf
+    section: "{{ item.section }}"
+    option: "{{ item.option }}"
+    state: absent
+  loop:
+    - { section: server, option: hostname }
+    - { section: server, option: prefix }
+    - { section: rhsm, option: baseurl }
+  when: rhsm_conf_stat.stat.exists
+  failed_when: false  # These may not exist
+
+# ============================================================================
+# PHASE 5: CLEAN YUM/DNF REPOS
+# ============================================================================
+
+- name: Remove old subscription manager repo files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/yum.repos.d/redhat.repo
+    - /etc/yum.repos.d/redhat-uep.repo
+  failed_when: false
+
+- name: Clean all DNF cache
+  ansible.builtin.command: dnf clean all
+  changed_when: true
+
+# ============================================================================
+# PHASE 6: VERIFY CLEAN STATE
+# ============================================================================
+
+- name: Verify system is not registered
+  ansible.builtin.command: subscription-manager identity
+  register: final_identity_check
+  failed_when: false
+  changed_when: false
+
+- name: Confirm clean state
+  ansible.builtin.assert:
+    that:
+      - final_identity_check.rc != 0
+    fail_msg: "System still appears to be registered after cleanup!"
+    success_msg: "System successfully cleaned and ready for Satellite registration"
+
+# ============================================================================
+# PHASE 7: ENSURE REQUIRED PACKAGES ARE PRESENT (FAILSAFE)
+# ============================================================================
+
+- name: Ensure base required packages are installed (failsafe)
+  ansible.builtin.dnf:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - chrony
+    - sos
+    - yum-utils
+    - dnf-utils
+  register: package_check
+  failed_when: false  # Don't fail if repos aren't available yet
+
+- name: Report package verification
+  ansible.builtin.debug:
+    msg: "Base packages verified: {{ package_check.changed | ternary('Some packages were missing and installed', 'All packages already present') }}"
+  when: capsule_debug_output | bool
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+
+- name: Registration preparation summary
+  ansible.builtin.debug:
+    msg:
+      - "================================================"
+      - "Capsule Registration Preparation Complete"
+      - "================================================"
+      - "Previous registration: {{ system_is_registered | ternary('Removed', 'None found') }}"
+      - "Katello packages: {{ katello_packages.stdout | length > 0 | ternary('Cleaned', 'None found') }}"
+      - "RHSM configuration: Reset to defaults"
+      - "Proxy configuration: Removed (direct connection)"
+      - "DNF cache: Cleaned"
+      - "System ready for: Satellite registration"
+      - "================================================"
+  when: capsule_debug_output | bool

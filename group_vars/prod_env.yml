@@ -1,0 +1,62 @@
+---
+# Production Environment Variables for Capsule Installation
+# Overrides values from all.yml for production environment
+
+# ============================================================================
+# SATELLITE CONFIGURATION (Production Environment)
+# ============================================================================
+
+# Production Satellite Server
+satellite_fqdn: "prodsatellite.example.com"
+satellite_shortname: "prodsatellite"
+satellite_server_url: "https://{{ satellite_fqdn }}"
+
+# ============================================================================
+# CAPSULE CONFIGURATION (Production Environment)
+# ============================================================================
+
+# Production Capsules (matching the satellite-install project)
+capsule_fqdns:
+  - prodcapsule1.example.com
+  - prodcapsule2.example.com
+  - prodcapsule3.example.com
+  - prodcapsule4.example.com
+  - globalcapsule.example.com
+
+# Load Balancer Configuration for Production
+# These Capsules are behind the load balancer
+loadbalanced_capsules:
+  - prodcapsule1.example.com
+  - prodcapsule2.example.com
+  - prodcapsule3.example.com
+  - prodcapsule4.example.com
+
+# Production load balancer FQDN
+capsule_loadbalancer_fqdn: "capsule.balancer.com"
+
+# ============================================================================
+# PRODUCTION-SPECIFIC SETTINGS
+# ============================================================================
+
+# Less verbose output in production
+capsule_debug_output: false
+
+# Production timeouts (more conservative)
+capsule_installer_timeout: 5400        # 90 minutes for production
+capsule_service_start_timeout: 600     # 10 minutes for production
+
+# Production verification settings
+verify_capsule_after_install: true
+capsule_health_check_retries: 3
+capsule_health_check_delay: 60         # Longer delay in production
+
+# Ensure logs are saved in production
+save_installation_logs: true
+installation_log_path: "/var/log/capsule-installation"
+
+# ============================================================================
+# PRODUCTION NOTES
+# ============================================================================
+# - globalcapsule.example.com is NOT load-balanced (standalone)
+# - prodcapsule1-4 are all behind the load balancer
+# - Ensure maintenance windows are scheduled for installation
