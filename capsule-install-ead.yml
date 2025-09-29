@@ -13,7 +13,7 @@
   become: true
   gather_facts: true
   vars_files:
-    - group_vars/ead_env.yml # Override with test environment specifics
+    - group_vars/ead_env.yml # Override with ead environment specifics
   
   # Module defaults for all redhat.satellite collection operations
   module_defaults:
