@@ -21,6 +21,7 @@ satellite_initial_admin_password: "{{ app_password }}"  # From AAP credential
 # Organization and Location
 satellite_org: "EO_ITRA"
 satellite_location: "default_location"
+itra_default_env: "EO_ITRA_ALL"
 
 # Python interpreter (ensure consistency)
 ansible_python_interpreter: /usr/bin/python3

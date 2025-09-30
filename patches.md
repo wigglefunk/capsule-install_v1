@@ -1,4 +1,17 @@
-# Base Capsule post configuration
+
+# Part of base capsule post config EO_ITRA_ALL ENVIRONMENT CREATION on the satellite_fqdn
+- name: "Create EO_ITRA_ALL lifecycle environment"
+  redhat.satellite.lifecycle_environment:
+    name: "{{ itra_default_env }}"
+    label: "{{ itra_default_env }}"
+    description: "Base working environment for 6.17 and beyond"
+    prior: "Library"
+    organization: "{{ satellite_org }}"
+    state: present
+    register: base_environment_creation
+
+
+# Base Capsule post configuration on the satellite_fqdn
 # This sets up EO_ITRA in Satellite
 - name: "Create Smart Proxy"
   redhat.satellite.smart_proxy:
@@ -9,14 +22,14 @@
     url: "https://{{ ansible_fqdn }}:9090"
     download_policy: "immediate"
     lifecycle_environments:
-      - "Development"
+      - "{{ itra_default_env }}"
     organizations:
-      - "Default Organization"
+      - "{{ satellite_org }}"
     locations:
-      - "Default Location"
+      - "{{ satellite_location }}"
     state: present
-
-    module > host_info
+    register: capsule_create_at_sat
+    
 
 Fetch information about Hosts
 Synopsis
