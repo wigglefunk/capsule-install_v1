@@ -140,7 +140,7 @@
   until: capsule_in_satellite.rc == 0
   changed_when: false
   failed_when: false
-  delegate_to: localhost
+  delegate_to: "{{ satellite_fqdn }}"
   become: true
 
 - name: Display Capsule details from Satellite

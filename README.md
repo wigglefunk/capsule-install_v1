@@ -264,7 +264,6 @@ Logs are saved to: `/var/log/capsule-installation/`
 This automation uses pre-configured Hammer CLI:
 - **No username/password parameters needed** in commands
 - **Root access required** (`become: true`)
-- **Runs on controller** (`delegate_to: localhost`)
 
 Example:
 ```yaml
@@ -272,7 +271,7 @@ Example:
 - name: Get Capsule info
   ansible.builtin.command: hammer capsule info --name "{{ name }}"
   become: true
-  delegate_to: localhost
+  delegate_to: "{{ satellite_fqdn }}"
 ```
 
 ### Authentication Patterns

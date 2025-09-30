@@ -117,7 +117,7 @@
           register: final_capsule_check
           changed_when: false
           failed_when: false
-          delegate_to: localhost
+          delegate_to: "{{ satellite_fqdn }}"
           become: true
 
         - name: Display final Capsule status
