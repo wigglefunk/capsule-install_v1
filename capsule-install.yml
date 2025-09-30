@@ -8,7 +8,8 @@
   hosts: all
   gather_facts: true
   become: true
-  
+  vars_files:
+    - group_vars/all.yml
   # ============================================================================
   # MODULE DEFAULTS - Applied to all redhat.satellite collection modules
   # ============================================================================

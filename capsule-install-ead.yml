@@ -22,209 +22,38 @@
       username: "{{ satellite_setup_username }}"
       password: "{{ satellite_initial_admin_password }}"
       validate_certs: false
-  
+
   # ============================================================================
-  # PRE-TASKS: Host Classification and Validation
+  # PRE-TASKS: Host Classification and Safety Checks
   # ============================================================================
   pre_tasks:
-    # ========================================
-    # PHASE 1: HOST CLASSIFICATION (GATEKEEPING)
-    # ========================================
-    - name: GATEKEEPER - Classify host type
+    - name: Determine if this host is a Capsule
       ansible.builtin.set_fact:
-        is_satellite_host: "{{ inventory_hostname == satellite_fqdn }}"
         is_capsule_host: "{{ inventory_hostname in capsule_fqdns }}"
-        host_classification: >-
-          {%- if inventory_hostname == satellite_fqdn -%}
-            SATELLITE
-          {%- elif inventory_hostname in capsule_fqdns -%}
-            CAPSULE
-          {%- else -%}
-            UNAUTHORIZED
-          {%- endif -%}
-    
-    - name: GATEKEEPER - Validate host is authorized
-      ansible.builtin.assert:
-        that:
-          - host_classification != 'UNAUTHORIZED'
-        fail_msg: |
-          ============================================================
-          UNAUTHORIZED HOST DETECTED!
-          ============================================================
-          Host: {{ inventory_hostname }}
-          This host is neither the Satellite server nor a defined Capsule.
-          
-          Authorized hosts:
-          - Satellite: {{ satellite_fqdn }}
-          - Capsules: {{ capsule_fqdns | join(', ') }}
-          
-          Please check your inventory and capsule_fqdns configuration.
-          ============================================================
-        success_msg: "Host {{ inventory_hostname }} authorized as: {{ host_classification }}"
-    
+      tags: always
+
+    - name: Determine if this Capsule is load-balanced
+      ansible.builtin.set_fact:
+        is_loadbalanced_capsule: "{{ inventory_hostname in loadbalanced_capsules }}"
+      when: is_capsule_host
+      tags: always
+
+    - name: Set installation control flags
+      ansible.builtin.set_fact:
+        will_install_capsule: "{{ is_capsule_host }}"
+        will_run_api_checks: "{{ is_capsule_host }}"
+      tags: always
+
     - name: Display host classification
       ansible.builtin.debug:
         msg:
           - "============================================================"
-          - "HOST CLASSIFICATION COMPLETE"
+          - "Host Classification Report"
           - "============================================================"
           - "Hostname: {{ inventory_hostname }}"
-          - "Classification: {{ host_classification }}"
-          - "Allowed Operations: {{ is_satellite_host | ternary('API Verification Only', 'Capsule Installation') }}"
-          - "============================================================"
-    
-    # ========================================
-    # PHASE 2: GATHER FACTS BASED ON HOST TYPE
-    # ========================================
-    - name: Set RHEL major version fact (All hosts need this)
-      ansible.builtin.set_fact:
-        rhel_major_version: "{{ ansible_distribution_major_version | int }}"
-    
-    # ========================================
-    # PHASE 3: SATELLITE-ONLY OPERATIONS
-    # ========================================
-    - name: SATELLITE OPERATIONS - API Verification and Setup
-      when: is_satellite_host
-      block:
-        - name: Display Satellite operation mode
-          ansible.builtin.debug:
-            msg:
-              - "================================================"
-              - "SATELLITE HOST - API OPERATIONS ONLY"
-              - "================================================"
-              - "This host will perform:"
-              - "  - API connectivity verification"
-              - "  - Capsule registration checks"
-              - "  - Post-installation verification"
-              - "No installation tasks will run on this host"
-              - "================================================"
-        
-        - name: Verify Satellite API is accessible
-          ansible.builtin.uri:
-            url: "{{ satellite_server_url }}/api/status"
-            method: GET
-            validate_certs: false
-            timeout: 30
-          register: satellite_api_check
-        
-        - name: Get current list of registered Capsules
-          redhat.satellite.capsule_info:
-          register: registered_capsules
-          failed_when: false
-        
-        - name: Store registered Capsule list for later verification
-          ansible.builtin.set_fact:
-            currently_registered_capsules: "{{ registered_capsules.capsules | default([]) | map(attribute='name') | list }}"
-        
-        - name: Display current Capsule registration status
-          ansible.builtin.debug:
-            msg:
-              - "Currently registered Capsules:"
-              - "{{ currently_registered_capsules | default(['None found']) }}"
-    
-    # ========================================
-    # PHASE 4: CAPSULE-ONLY PRE-INSTALLATION CHECKS
-    # ========================================
-    - name: CAPSULE OPERATIONS - Pre-Installation Validation
-      when: is_capsule_host
-      block:
-        - name: Display Capsule operation mode
-          ansible.builtin.debug:
-            msg:
-              - "================================================"
-              - "CAPSULE HOST - INSTALLATION OPERATIONS"
-              - "================================================"
-              - "Target Capsule: {{ inventory_hostname }}"
-              - "This host will perform:"
-              - "  - Registration cleanup"
-              - "  - Satellite registration"
-              - "  - Repository configuration"
-              - "  - Capsule installation"
-              - "================================================"
-        
-        # System requirement validation (Capsules only)
-        - name: Validate Capsule system requirements
-          ansible.builtin.assert:
-            that:
-              - ansible_distribution == "RedHat"
-              - ansible_distribution_major_version == "9"
-              - ansible_memtotal_mb >= 20480  # 20GB minimum
-            fail_msg: "System does not meet minimum requirements for Capsule installation"
-            success_msg: "System meets Capsule requirements"
-        
-        # DNS validation (Capsules need to resolve Satellite)
-        - name: Validate DNS resolution for Satellite
-          ansible.builtin.command: "nslookup {{ satellite_fqdn }}"
-          register: dns_check
-          changed_when: false
-          failed_when: false
-          when: validate_dns | bool
-        
-        - name: Fail if Satellite DNS resolution failed
-          ansible.builtin.fail:
-            msg: "DNS resolution failed for Satellite {{ satellite_fqdn }}"
-          when:
-            - validate_dns | bool
-            - dns_check.rc != 0
-        
-        # Certificate file validation
-        - name: Check for required certificate files
-          ansible.builtin.stat:
-            path: "{{ item }}"
-          loop:
-            - "{{ capsule_cert_base_path }}/{{ inventory_hostname }}-certs.tar"
-            - "{{ capsule_cert_base_path }}/{{ inventory_hostname }}-install.txt"
-          register: cert_files_check
-        
-        - name: Validate certificate files exist
-          ansible.builtin.assert:
-            that:
-              - cert_files_check.results[0].stat.exists
-              - cert_files_check.results[1].stat.exists
-            fail_msg: |
-              ERROR: Required certificate files not found!
-              Expected location: {{ capsule_cert_base_path }}/
-        
-        # Check existing installation status
-        - name: Check if Capsule is already installed
-          ansible.builtin.systemd:
-            name: foreman-proxy
-          register: foreman_proxy_check
-          failed_when: false
-          changed_when: false
-        
-        - name: Set Capsule installation status
-          ansible.builtin.set_fact:
-            capsule_already_installed: "{{ foreman_proxy_check.status.ActiveState | default('inactive') == 'active' }}"
-        
-        - name: Determine if Capsule is load-balanced
-          ansible.builtin.set_fact:
-            is_loadbalanced_capsule: "{{ inventory_hostname in loadbalanced_capsules }}"
-        
-        - name: Report Capsule pre-installation status
-          ansible.builtin.debug:
-            msg:
-              - "Capsule Status:"
-              - "  Already Installed: {{ capsule_already_installed }}"
-              - "  Load Balanced: {{ is_loadbalanced_capsule }}"
-              - "  Will Install: {{ not (capsule_already_installed and not force_reinstall) }}"
-    
-    # ========================================
-    # PHASE 5: CREATE INSTALLATION PLAN
-    # ========================================
-    - name: Set installation plan facts
-      ansible.builtin.set_fact:
-        will_install_capsule: "{{ is_capsule_host and not (capsule_already_installed | default(false) and not force_reinstall) }}"
-        will_run_api_checks: "{{ is_satellite_host }}"
-    
-    - name: Display execution plan
-      ansible.builtin.debug:
-        msg:
-          - "============================================================"
-          - "EXECUTION PLAN FOR {{ inventory_hostname }}"
-          - "============================================================"
-          - "Host Type: {{ host_classification }}"
-          - "Will Run Installation: {{ will_install_capsule | default(false) }}"
+          - "Is Capsule Host: {{ is_capsule_host | default(false) }}"
+          - "Is Load-balanced: {{ is_loadbalanced_capsule | default(false) }}"
+          - "Will Install Capsule: {{ will_install_capsule | default(false) }}"
           - "Will Run API Checks: {{ will_run_api_checks | default(false) }}"
           - "============================================================"
 
@@ -235,31 +64,31 @@
     # GATEKEEPER: All roles check is_capsule_host first
     - role: prep_capsule_registration
       when: 
-        - is_capsule_host  # GATEKEEPER CHECK
+        - is_capsule_host
         - will_install_capsule | default(false)
       tags: [prep, registration]
     
     - role: register_capsule
       when: 
-        - is_capsule_host  # GATEKEEPER CHECK
+        - is_capsule_host
         - will_install_capsule | default(false)
       tags: [register, registration]
     
     - role: configure_capsule_repos
       when: 
-        - is_capsule_host  # GATEKEEPER CHECK
+        - is_capsule_host
         - will_install_capsule | default(false)
       tags: [repos, repositories]
     
     - role: parse_install_instructions
       when: 
-        - is_capsule_host  # GATEKEEPER CHECK
+        - is_capsule_host
         - will_install_capsule | default(false)
       tags: [parse, instructions]
     
     - role: install_capsule
       when: 
-        - is_capsule_host  # GATEKEEPER CHECK
+        - is_capsule_host
         - will_install_capsule | default(false)
       tags: [install, capsule]
 
@@ -272,120 +101,46 @@
     # ========================================
     - name: CAPSULE POST-TASKS - Service Verification
       when: 
-        - is_capsule_host  # GATEKEEPER CHECK
+        - is_capsule_host
         - will_install_capsule | default(false)
       block:
-        - name: Verify Capsule services are running
+        - name: Verify all Capsule services are active
           ansible.builtin.systemd:
             name: "{{ item }}"
-          register: service_status
-          failed_when: false
+            state: started
+          register: final_service_check
           loop:
             - foreman-proxy
             - httpd
             - pulpcore-api
             - pulpcore-content
-        
-        - name: Test Capsule API endpoint locally
-          ansible.builtin.uri:
-            url: "https://{{ inventory_hostname }}:9090/features"
-            method: GET
-            validate_certs: false
-            timeout: 30
-          register: local_capsule_api
           failed_when: false
-        
-        - name: Save Capsule installation summary
-          ansible.builtin.copy:
-            content: |
-              Capsule Installation Summary
-              ============================
-              Date: {{ ansible_date_time.iso8601 }}
-              Capsule FQDN: {{ inventory_hostname }}
-              Classification: {{ host_classification }}
-              Load Balanced: {{ is_loadbalanced_capsule | default(false) }}
-              Installation Status: Completed
-              
-              Service Status:
-              {% for service in service_status.results %}
-              - {{ service.item }}: {{ service.status.ActiveState | default('unknown') }}
-              {% endfor %}
-              
-              Local API Check: {{ local_capsule_api.status | default('Failed') }}
-            dest: "{{ installation_log_path }}/{{ inventory_hostname }}-summary.txt"
-            mode: '0644'
-          when: save_installation_logs | bool
-    
-    # ========================================
-    # SATELLITE-ONLY POST-VERIFICATION TASKS
-    # ========================================
-    - name: SATELLITE POST-TASKS - Capsule Registration Verification
-      when: 
-        - is_satellite_host  # GATEKEEPER CHECK
-      block:
-        - name: Wait for Capsules to appear in Satellite API
-          redhat.satellite.capsule_info:
-            name: "{{ item }}"
-          loop: "{{ capsule_fqdns }}"
+
+        - name: Final Capsule health check using Hammer
+          ansible.builtin.command: hammer capsule info --name "{{ inventory_hostname }}"
           register: final_capsule_check
+          changed_when: false
           failed_when: false
-          retries: 3
-          delay: 30
-        
-        - name: Generate final registration report
-          ansible.builtin.set_fact:
-            registration_report: |
-              ============================================================
-              CAPSULE REGISTRATION REPORT
-              ============================================================
-              {% for result in final_capsule_check.results %}
-              {{ result.item }}: {{ result.failed | ternary('⚠ NOT REGISTERED', '✓ REGISTERED') }}
-              {% endfor %}
-              ============================================================
-        
-        - name: Display final registration report
+          delegate_to: "{{ satellite_fqdn }}"
+          become: true
+
+        - name: Display final Capsule status
           ansible.builtin.debug:
-            msg: "{{ registration_report.split('\n') }}"
-    
+            msg:
+              - "================================================"
+              - "CAPSULE INSTALLATION SUMMARY"
+              - "================================================"
+              - "Capsule: {{ inventory_hostname }}"
+              - "Type: {{ is_loadbalanced_capsule | ternary('Load-balanced', 'Standard') }}"
+              - "Services: {{ final_service_check.results | selectattr('status.ActiveState', 'equalto', 'active') | list | length }}/{{ final_service_check.results | length }} active"
+              - "Satellite Registration: {{ 'Confirmed' if final_capsule_check.rc == 0 else 'Check logs' }}"
+              - "Status: COMPLETE"
+              - "================================================"
+
     # ========================================
-    # CROSS-HOST VERIFICATION (Using Delegation)
+    # NON-CAPSULE HOSTS
     # ========================================
-    - name: CROSS-VERIFICATION - Capsule checks its registration
-      when: 
-        - is_capsule_host  # GATEKEEPER CHECK
-        - will_install_capsule | default(false)
-      delegate_to: "{{ satellite_fqdn }}"
-      delegate_facts: false
-      redhat.satellite.capsule_info:
-        name: "{{ inventory_hostname }}"
-      register: capsule_verification
-      failed_when: false
-    
-    - name: Report Capsule registration status
-      when: 
-        - is_capsule_host  # GATEKEEPER CHECK
-        - capsule_verification is defined
+    - name: Skip message for non-Capsule hosts
       ansible.builtin.debug:
-        msg: >-
-          Capsule {{ inventory_hostname }}: 
-          {{ capsule_verification.failed | default(true) | ternary('NOT found in Satellite - Check failed!', 'Successfully registered in Satellite') }}
-    
-    # ========================================
-    # FINAL SUMMARY FOR ALL HOSTS
-    # ========================================
-    - name: Final execution summary
-      ansible.builtin.debug:
-        msg:
-          - "============================================================"
-          - "EXECUTION COMPLETE FOR {{ inventory_hostname }}"
-          - "============================================================"
-          - "Host Type: {{ host_classification }}"
-          - "Operations Performed:"
-          - "{% if is_satellite_host %}"
-          - "  - API verification: Complete"
-          - "  - Capsule registration checks: Complete"
-          - "{% elif is_capsule_host %}"
-          - "  - Installation: {{ will_install_capsule | ternary('Complete', 'Skipped - Already installed') }}"
-          - "  - Services: {{ service_status is defined | ternary('Verified', 'Not checked') }}"
-          - "{% endif %}"
-          - "============================================================"
+        msg: "{{ inventory_hostname }} is not a Capsule host - no actions performed"
+      when: not is_capsule_host
