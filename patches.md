@@ -20,7 +20,7 @@
     server_url: "https://{{ satellite_fqdn }}"
     name: "{{ ansible_fqdn }}"
     url: "https://{{ ansible_fqdn }}:9090"
-    download_policy: "immediate"
+    download_policy: "{{ capsule_download_policy }}"
     lifecycle_environments:
       - "{{ itra_default_env }}"
     organizations:

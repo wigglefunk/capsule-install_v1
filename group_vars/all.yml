@@ -22,7 +22,7 @@ satellite_initial_admin_password: "{{ app_password }}"  # From AAP credential
 satellite_org: "EO_ITRA"
 satellite_location: "default_location"
 itra_default_env: "EO_ITRA_ALL"
-
+capsule_download_policy: "on_demand"  # Capsule content download policy
 # Python interpreter (ensure consistency)
 ansible_python_interpreter: /usr/bin/python3
 
