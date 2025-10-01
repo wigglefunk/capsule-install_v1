@@ -6,6 +6,44 @@
 # CORRECTED VERSION - All module issues fixed
 
 # ============================================================================
+# Pre-check: CHECK IF CAPSULE ALREADY INSTALLED (IDEMPOTENCY)
+# ============================================================================
+
+- name: Check if Capsule is already installed
+  ansible.builtin.systemd:
+    name: foreman-proxy
+  register: capsule_service_status
+  failed_when: false
+  changed_when: false
+
+- name: Check if satellite-capsule package is installed
+  ansible.builtin.command: rpm -q satellite-capsule
+  register: capsule_package_check
+  failed_when: false
+  changed_when: false
+
+- name: Determine if Capsule is already installed
+  ansible.builtin.set_fact:
+    capsule_already_installed: "{{ (capsule_service_status.status.ActiveState | default('inactive')) == 'active' and capsule_package_check.rc == 0 }}"
+
+- name: Skip installation if already installed
+  ansible.builtin.debug:
+    msg:
+      - "Capsule is already installed and running on {{ inventory_hostname }}"
+      - "Service status: {{ capsule_service_status.status.ActiveState | default('unknown') }}"
+      - "Package installed: {{ capsule_package_check.rc == 0 }}"
+      - "Set force_reinstall=true to reinstall"
+  when:
+    - capsule_already_installed
+    - not force_reinstall | default(false)
+
+- name: End play if already installed and not forcing reinstall
+  ansible.builtin.meta: end_host
+  when:
+    - capsule_already_installed
+    - not force_reinstall | default(false)
+
+# ============================================================================
 # PHASE 1: PRE-INSTALLATION VERIFICATION
 # ============================================================================
 
