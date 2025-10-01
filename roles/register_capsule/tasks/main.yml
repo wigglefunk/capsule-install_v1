@@ -122,8 +122,6 @@
 # PHASE 5: VERIFY IN SATELLITE USING HAMMER CLI
 # ============================================================================
 
-# FIXED: Using hammer command instead of non-existent host_info module
-# Hammer is pre-configured with credentials and runs with root access
 - name: Verify host appears in Satellite
   ansible.builtin.command: hammer host info --name "{{ inventory_hostname }}"
   register: host_in_satellite

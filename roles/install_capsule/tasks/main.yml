@@ -102,7 +102,7 @@
 
 - name: Wait for Capsule services to start
   ansible.builtin.pause:
-    seconds: 30
+    seconds: 45
     prompt: "Waiting for services to initialize..."
 
 - name: Check critical Capsule services
@@ -127,34 +127,7 @@
   when: capsule_debug_output | bool
 
 # ============================================================================
-# PHASE 5: VERIFY CAPSULE IN SATELLITE USING HAMMER CLI
-# ============================================================================
-
-# FIXED: Using hammer capsule info instead of non-existent capsule_info module
-# Hammer is pre-configured with credentials and runs with root access
-- name: Wait for Capsule to appear in Satellite
-  ansible.builtin.command: hammer capsule info --name "{{ inventory_hostname }}"
-  register: capsule_in_satellite
-  retries: "{{ capsule_health_check_retries }}"
-  delay: "{{ capsule_health_check_delay }}"
-  until: capsule_in_satellite.rc == 0
-  changed_when: false
-  failed_when: false
-  delegate_to: "{{ satellite_fqdn }}"
-  become: true
-
-- name: Display Capsule details from Satellite
-  ansible.builtin.debug:
-    msg:
-      - "Capsule registered in Satellite:"
-      - "  Name: {{ inventory_hostname }}"
-      - "  Command exit code: {{ capsule_in_satellite.rc }}"
-  when: 
-    - capsule_debug_output | bool
-    - capsule_in_satellite.rc == 0
-
-# ============================================================================
-# PHASE 6: TEST CAPSULE CONNECTIVITY
+# PHASE 5: TEST CAPSULE CONNECTIVITY
 # ============================================================================
 
 - name: Test Capsule API endpoint
@@ -174,7 +147,7 @@
   when: capsule_debug_output | bool
 
 # ============================================================================
-# PHASE 7: EXTRACT AND SAVE INSTALLATION SUMMARY
+# PHASE 6: EXTRACT AND SAVE INSTALLATION SUMMARY
 # ============================================================================
 
 - name: Extract installation summary from log
