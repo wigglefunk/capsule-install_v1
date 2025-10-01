@@ -31,11 +31,15 @@
   # PRE-TASKS: Host Classification and Safety Checks
   # ============================================================================
   pre_tasks:
+    - name: Set RHEL major version
+      ansible.builtin.set_fact:
+        rhel_major_version: "{{ ansible_distribution_major_version | int }}"
+        
     - name: Determine if this is the Satellite host
       ansible.builtin.set_fact:
         is_satellite_host: "{{ inventory_hostname == satellite_fqdn }}"
       tags: always
-      
+
     - name: Determine if this host is a Capsule
       ansible.builtin.set_fact:
         is_capsule_host: "{{ inventory_hostname in capsule_fqdns }}"
