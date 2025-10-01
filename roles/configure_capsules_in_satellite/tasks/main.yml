@@ -18,12 +18,16 @@
 - name: Report lifecycle environment status
   ansible.builtin.debug:
     msg: "Lifecycle environment '{{ itra_default_env }}': {{ lifecycle_env_result.changed | ternary('Created', 'Already exists') }}"
+  when: capsule_debug_output | bool
 
+# ============================================================================
+# CONFIGURE EACH CAPSULE AS SMART PROXY
+# ============================================================================
 - name: Configure each Capsule as Smart Proxy in Satellite
   redhat.satellite.smart_proxy:
     name: "{{ item }}"
     url: "https://{{ item }}:9090"
-    download_policy: "{{ capsule_download_policy }}"  # Uses the variable from group_vars
+    download_policy: "{{ capsule_download_policy }}"
     lifecycle_environments:
       - "{{ itra_default_env }}"
     organizations:
@@ -44,8 +48,67 @@
   loop: "{{ smart_proxy_results.results }}"
   loop_control:
     label: "{{ item.item }}"
-  when: smart_proxy_results is defined
+  when: 
+    - capsule_debug_output | bool
+    - smart_proxy_results is defined
 
+# ============================================================================
+# SET HTTP PROXY EXCEPTIONS FOR ALL CAPSULES
+# CRITICAL: Query Satellite for ACTUAL registered Capsules, not our intended list
+# This ensures we only set exceptions for Capsules that truly exist in Satellite
+# The setting requires a comma-separated string and overwrites the entire list
+# ============================================================================
+- name: Query Satellite for actually registered Capsules
+  ansible.builtin.shell: |
+    hammer --no-headers capsule list \
+      --organization "{{ satellite_org }}" \
+      --fields Name | \
+      awk -vRS="" -vOFS=',' '$1=$1'
+  register: capsule_list
+  changed_when: false
+  failed_when: false
+
+- name: Display Capsules actually registered in Satellite
+  ansible.builtin.debug:
+    msg: 
+      - "Capsules found in Satellite: {{ capsule_list.stdout }}"
+      - "Return code: {{ capsule_list.rc }}"
+  when: capsule_debug_output | bool
+
+- name: Set HTTP proxy exception list based on actual Satellite state
+  ansible.builtin.shell: |
+    hammer settings set \
+      --name http_proxy_except_list \
+      --value '["{{ capsule_list.stdout }}"]'
+  register: proxy_exceptions
+  changed_when: "'Setting [http_proxy_except_list] updated' in proxy_exceptions.stdout"
+  when: 
+    - capsule_list.rc == 0
+    - capsule_list.stdout | length > 0
+  failed_when:
+    - proxy_exceptions.rc != 0
+    - "'Setting [http_proxy_except_list] updated' not in proxy_exceptions.stdout"
+
+- name: Display proxy exception configuration result
+  ansible.builtin.debug:
+    msg:
+      - "Proxy exceptions command result:"
+      - "{{ proxy_exceptions.stdout }}"
+      - "Changed: {{ proxy_exceptions.changed }}"
+  when: 
+    - capsule_debug_output | bool
+    - proxy_exceptions is defined
+
+- name: Report if no Capsules were found
+  ansible.builtin.debug:
+    msg: "WARNING: No Capsules found in Satellite for organization {{ satellite_org }}"
+  when:
+    - capsule_list.stdout | length == 0
+    - capsule_fqdns | length > 0
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
 - name: Configuration summary
   ansible.builtin.debug:
     msg:
@@ -53,9 +116,11 @@
       - "Capsule Post-Configuration Complete"
       - "================================================"
       - "Lifecycle Environment: {{ itra_default_env }} - {{ lifecycle_env_result.changed | ternary('Created', 'Already exists') }}"
-      - "Capsules Configured: {{ capsule_fqdns | length }}"
-      - "{% for capsule in capsule_fqdns %}  - {{ capsule }}{% endfor %}"
+      - "Intended Capsules: {{ capsule_fqdns | length }}"
+      - "Actually Registered: {{ capsule_list.stdout.split(',') | length if capsule_list.stdout else 0 }}"
+      - "{% if capsule_list.stdout %}Registered Capsules: {{ capsule_list.stdout }}{% endif %}"
       - "Organization: {{ satellite_org }}"
       - "Location: {{ satellite_location }}"
-      - "Download Policy: {{ capsule_download_policy }}"  # Shows which policy is being used
+      - "Download Policy: {{ capsule_download_policy }}"
+      - "Proxy Exceptions: {{ proxy_exceptions.changed | default(false) | ternary('Updated', 'No change needed') }}"
       - "================================================"
