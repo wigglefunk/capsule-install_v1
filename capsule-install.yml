@@ -88,6 +88,12 @@
         - is_capsule_host
         - will_install_capsule | default(false)
       tags: [install, capsule]
+    
+    - role: configure_capsules_in_satellite
+      when: 
+        - is_satellite_host  # Only run on Satellite host
+        - capsule_fqdns | length > 0  # Only if Capsules exist
+      tags: [configure, post-config, capsule-config]
 
   # ============================================================================
   # POST-TASKS: Properly Isolated by Host Type

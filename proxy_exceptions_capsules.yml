@@ -1,0 +1,18 @@
+---
+
+
+  tasks:
+    - name:  Hammer command to get clean list of Capsules
+      shell:  hammer --no-headers capsule list --organization EO_ITRA --fields Name | awk -vRS="" -vOFS=',' '$1=$1'
+      register: capsule_list
+    
+    - name: Get the correct string  
+      debug:  
+        var:  capsule_list
+      
+    - name: Hammer command to set proxy exceptions for registered capsules
+      shell:  hammer settings set --name=http_proxy_except_list --value=["{{ capsule_list.stdout }}"]
+      register: complete_command
+    
+    - debug:
+        var:  complete_command.stdout

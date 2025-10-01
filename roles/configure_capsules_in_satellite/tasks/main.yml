@@ -1,0 +1,61 @@
+---
+# ============================================================================
+# ROLE: configure_capsules_in_satellite
+# Runs on: Satellite host only (when: is_satellite_host)
+# Purpose: Configure installed Capsules in Satellite as Smart Proxies
+# ============================================================================
+
+- name: Ensure base lifecycle environment exists
+  redhat.satellite.lifecycle_environment:
+    name: "{{ itra_default_env }}"
+    label: "{{ itra_default_env }}"
+    description: "Base working environment for 6.17 and beyond"
+    prior: "Library"
+    organization: "{{ satellite_org }}"
+    state: present
+  register: lifecycle_env_result
+
+- name: Report lifecycle environment status
+  ansible.builtin.debug:
+    msg: "Lifecycle environment '{{ itra_default_env }}': {{ lifecycle_env_result.changed | ternary('Created', 'Already exists') }}"
+
+- name: Configure each Capsule as Smart Proxy in Satellite
+  redhat.satellite.smart_proxy:
+    name: "{{ item }}"
+    url: "https://{{ item }}:9090"
+    download_policy: "{{ capsule_download_policy }}"  # Uses the variable from group_vars
+    lifecycle_environments:
+      - "{{ itra_default_env }}"
+    organizations:
+      - "{{ satellite_org }}"
+    locations:
+      - "{{ satellite_location }}"
+    state: present
+  loop: "{{ capsule_fqdns }}"
+  register: smart_proxy_results
+  retries: 3
+  delay: 30
+  until: smart_proxy_results is succeeded
+  when: capsule_fqdns | length > 0
+
+- name: Display smart proxy configuration results
+  ansible.builtin.debug:
+    msg: "Capsule '{{ item.item }}': {{ item.changed | ternary('Configured', 'Already configured') }}"
+  loop: "{{ smart_proxy_results.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: smart_proxy_results is defined
+
+- name: Configuration summary
+  ansible.builtin.debug:
+    msg:
+      - "================================================"
+      - "Capsule Post-Configuration Complete"
+      - "================================================"
+      - "Lifecycle Environment: {{ itra_default_env }} - {{ lifecycle_env_result.changed | ternary('Created', 'Already exists') }}"
+      - "Capsules Configured: {{ capsule_fqdns | length }}"
+      - "{% for capsule in capsule_fqdns %}  - {{ capsule }}{% endfor %}"
+      - "Organization: {{ satellite_org }}"
+      - "Location: {{ satellite_location }}"
+      - "Download Policy: {{ capsule_download_policy }}"  # Shows which policy is being used
+      - "================================================"
