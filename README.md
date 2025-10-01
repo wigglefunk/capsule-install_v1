@@ -1,300 +1,335 @@
-# Capsule Installation Automation
+# Red Hat Satellite Capsule Installation Automation
 
-This project automates the installation of Red Hat Satellite 6.17 Capsule servers.
+## What This Project Does
 
-## Overview
+This automation installs Red Hat Satellite Capsule servers by picking up where the satellite-install project leaves off. Think of it as the second half of a two-step process: the satellite-install project creates certificates and installation instructions, and this project uses those files to actually install the Capsules.
 
-This automation picks up where the satellite-install project leaves off, using the certificate tarballs and installation instructions that were generated and distributed to install Capsule servers.
+## Why This Automation Exists
 
-The automation handles:
-- Capsule registration to Satellite using activation keys
-- Repository configuration
-- Certificate-based installation
-- Both standard and load-balanced Capsule configurations
-- Complete verification and health checks
+Installing Capsule servers manually is tedious and error-prone. You need to:
+- Register each server to Satellite
+- Enable the correct repositories
+- Parse complex installation commands
+- Handle load-balanced configurations differently
+- Verify everything works
 
-## Prerequisites
+This automation handles all of that consistently across development, test, and production environments.
 
-### Infrastructure Requirements
-- RHEL 9.x servers provisioned for Capsules
-- Certificate files distributed by satellite-install project:
-  - `/root/capsule_cert/<capsule_fqdn>-certs.tar`
-  - `/root/capsule_cert/<capsule_fqdn>-install.txt`
-- Storage volumes configured (from satellite-install project)
-- Direct network connectivity to Satellite server (no proxy)
+## Prerequisites - What You Need Before Starting
+
+### Files That Must Already Exist
+
+The satellite-install project should have already created these files on each Capsule server:
+
+```bash
+/root/capsule_cert/capsule.example.com-certs.tar        # Certificate bundle
+/root/capsule_cert/capsule.example.com-install.txt      # Installation command with OAuth keys
+```
+
+**Why these files matter:** The certificate file proves to Satellite that this is a legitimate Capsule, and the install.txt file contains the exact command (with security tokens) needed to connect this Capsule to your specific Satellite server.
 
 ### Satellite Configuration
-- Activation key `satellite-infrastructure` must exist in Satellite
-- Activation key must be associated with appropriate content view
-- Required Capsule repositories synchronized in Satellite:
-  - RHEL 9 BaseOS
-  - RHEL 9 AppStream
-  - Satellite Capsule 6.17
-  - Satellite Maintenance 6.17
 
-### Ansible Automation Platform
-- AAP 2.x configured
-- Required collections installed (see `collections/requirements.yml`)
-- Credentials configured:
+Your Satellite server must have an activation key called `satellite-infrastructure` that:
+- Points to a Content View with Capsule repositories
+- Belongs to your organization (usually "EO_ITRA")
+- Has the correct subscriptions attached
+
+**Why we need this:** Activation keys are like pre-configured profiles. Instead of manually subscribing each Capsule, the activation key automatically applies the correct subscriptions and repository access.
+
+### Infrastructure Requirements
+
+- **RHEL 9.x servers** (freshly installed)
+- **Direct network connection** from Capsule to Satellite (no proxy between them)
+- **DNS working** for all server names
+- **Storage already configured** (done by satellite-install project)
+
+**Why direct network access:** Capsules talk to Satellite frequently to sync content and report status. A proxy between them adds complexity and potential failure points.
+
+### Ansible Automation Platform (AAP) Setup
+
+You need AAP configured with:
+- **Collections installed:** `redhat.satellite` (v3.0.0+) and `community.general` (v6.0.0+)
+- **Credentials configured:**
   - `app_username` - Satellite admin username
   - `app_password` - Satellite admin password
 
-### Controller Requirements
-- **Hammer CLI** must be installed and configured
-- Hammer credentials pre-configured in `/root/.hammer/cli.modules.d/foreman.yml`
-- Root access required for Hammer commands
+**Why AAP:** AAP provides credential management, job scheduling, and audit trails. The credentials are injected at runtime so they never appear in code.
 
-## Project Structure
+## How the Automation Works - Step by Step
 
-```
-capsule-install/
-├── capsule-install.yml          # Development environment
-├── capsule-install-test.yml     # Test environment
-├── capsule-install-prod.yml     # Production environment
-├── capsule-install-ead.yml      # EAD environment
-├── group_vars/
-│   ├── all.yml                  # Default (dev) variables
-│   ├── test_env.yml             # Test environment
-│   ├── prod_env.yml             # Production environment
-│   └── ead_env.yml              # EAD environment
-├── roles/
-│   ├── prep_capsule_registration/    # Clean existing registrations
-│   ├── register_capsule/             # Register to Satellite
-│   ├── configure_capsule_repos/      # Enable repositories
-│   ├── parse_install_instructions/   # Extract installer command
-│   └── install_capsule/              # Execute installation
-└── collections/
-    └── requirements.yml
-```
+When you run this automation, here's what happens in order:
 
-## Usage
+### Step 1: Host Classification (Pre-Tasks)
 
-### Quick Start
+**What happens:**
+- Ansible gathers basic facts about the server (OS version, hostname, etc.)
+- Sets `rhel_major_version` from those facts (needed for repository names)
+- Checks if this server is in the `capsule_fqdns` list
+- Checks if it's in the `loadbalanced_capsules` list
 
-1. **Verify Prerequisites**
-   ```bash
-   # Test Hammer CLI
-   sudo hammer ping
-   sudo hammer capsule list
-   
-   # Verify certificate files exist
-   ls -la /root/capsule_cert/
-   ```
+**Why this matters:** Not every server in your inventory should be treated as a Capsule. This classification ensures the automation only runs on servers that are supposed to be Capsules, and handles load-balanced ones differently.
 
-2. **Run for Development Environment**
-   ```bash
-   ansible-playbook capsule-install.yml \
-     --limit devcapsule.example.com
-   ```
+### Step 2: Pre-Registration Cleanup (`prep_capsule_registration`)
 
-3. **Run for Other Environments**
-   ```bash
-   # Test
-   ansible-playbook capsule-install-test.yml \
-     --limit testcapsule.example.com
-   
-   # Production (always check mode first!)
-   ansible-playbook capsule-install-prod.yml \
-     --limit prodcapsule.example.com \
-     --check
-   ```
+**What happens:**
+- Checks if the server is already registered somewhere
+- If yes, unregisters it cleanly
+- Removes old `katello-ca-consumer` packages (from previous Satellite versions)
+- Cleans the subscription-manager cache
 
-### Configuration
+**Why this is necessary:** Leftover registrations cause confusion. If a server is still registered to an old Satellite (or Red Hat CDN), the new registration will fail. Starting with a clean slate prevents hours of troubleshooting mysterious registration errors.
 
-Key variables in `group_vars/all.yml`:
+### Step 3: Capsule Registration (`register_capsule`)
+
+**What happens:**
+- Tests network connectivity to Satellite's API
+- Uses the `redhat.satellite.registration_command` module to generate a registration command
+- Executes that command to register the Capsule to Satellite
+- Verifies registration succeeded using `subscription-manager identity`
+- Confirms the host appears in Satellite using Hammer CLI
+
+**Why we use the Satellite collection:** The `redhat.satellite` collection knows how to properly format registration commands for Satellite 6.17. It handles OAuth tokens, activation keys, and all the security parameters automatically. Doing this manually would require knowing dozens of command-line options.
+
+**Why we verify twice:** First we check locally (subscription-manager) that the Capsule thinks it's registered. Then we check remotely (Hammer CLI on Satellite) that Satellite agrees. Both must succeed for registration to be valid.
+
+### Step 4: Repository Configuration (`configure_capsule_repos`)
+
+**What happens:**
+- Disables ALL repositories (`subscription-manager repos --disable="*"`)
+- Enables only the four repositories needed for Capsule:
+  - RHEL BaseOS (operating system packages)
+  - RHEL AppStream (application packages)
+  - Satellite Capsule (the actual Capsule software)
+  - Satellite Maintenance (update and maintenance tools)
+- Verifies the `satellite-capsule` package is available
+
+**Why disable everything first:** Servers often have dozens of repositories enabled by default. Extra repositories slow down package operations and can cause conflicts. We want only what's needed.
+
+**Why we verify package availability:** If the repositories are enabled but the package isn't available, something is wrong with the Satellite's content (maybe the repos aren't synced). Catching this now saves time later.
+
+### Step 5: Parse Installation Instructions (`parse_install_instructions`)
+
+**What happens:**
+- Reads the `/root/capsule_cert/capsule.example.com-install.txt` file
+- Extracts the `satellite-installer` command from it
+- If this is a load-balanced Capsule, appends special parameters:
+  - `--certs-cname "loadbalancer.example.com"`
+  - `--enable-foreman-proxy-plugin-remote-execution-script`
+- Saves the final command for the next step
+
+**Why we parse instead of running the file directly:** The instruction file contains explanatory text and options. We need to extract just the command and potentially modify it for load balancers. This parsing ensures we run the exact right command.
+
+**Why load-balanced Capsules need extra options:** When Capsules are behind a load balancer, clients connect to the load balancer's FQDN, not the Capsule's FQDN. The `--certs-cname` parameter tells the Capsule "clients will use this other name to reach me, so accept that in SSL certificates."
+
+### Step 6: Capsule Installation (`install_capsule`)
+
+**What happens:**
+- Verifies the certificate tarball exists
+- Runs the `satellite-installer` command (this takes 30-60 minutes)
+- Monitors the installation with a 1-hour timeout
+- Saves all output to `/var/log/capsule-installation/capsule-installer-[timestamp].log`
+- Waits 45 seconds for services to initialize
+- Checks that critical services are running:
+  - `foreman-proxy` (main Capsule service)
+  - `httpd` (web server)
+  - `pulpcore-api` (content API)
+  - `pulpcore-content` (content delivery)
+  - `pulpcore-worker@1` (background jobs)
+- Tests the Capsule API at `https://capsule:9090/features`
+
+**Why this takes so long:** The installer is doing a LOT - installing packages, configuring databases, generating SSL configurations, setting up web servers, and configuring dozens of services. 30-60 minutes is normal.
+
+**Why we save logs:** When installations fail, the logs are essential for troubleshooting. We save them with timestamps so you can compare successful and failed runs.
+
+**Why we test the API:** A Capsule isn't truly working until its API responds. This test proves the Capsule is ready for use, not just that the installer finished.
+
+### Step 7: Configure in Satellite (`configure_capsules_in_satellite`)
+
+**What happens:**
+- Creates a lifecycle environment called "EO_ITRA_ALL" (if it doesn't exist)
+- Registers each Capsule as a "Smart Proxy" in Satellite
+- Associates it with the lifecycle environment
+- Sets the download policy to "on_demand" (Capsule only downloads content when clients request it)
+
+**Why this runs on the Satellite server:** Only Satellite knows about Smart Proxies. This step tells Satellite "these Capsules exist and are authorized to sync content."
+
+**Why we need a lifecycle environment:** In Satellite, lifecycle environments organize content into stages (like "Development" → "Testing" → "Production"). Capsules must be assigned to environments to know which content to sync.
+
+### Step 8: Final Verification (Post-Tasks)
+
+**What happens:**
+- Checks that all services are still running (they should be)
+- Confirms service states
+- Reports success
+
+**Why verify again:** Services might start but then crash. This final check ensures everything is stable.
+
+## Configuration Files Explained
+
+### Environment-Specific Playbooks
+
+You'll see four playbooks:
+- `capsule-install.yml` (development)
+- `capsule-install-test.yml` (test)
+- `capsule-install-prod.yml` (production)
+- `capsule-install-ead.yml` (EAD environment)
+
+**Why separate playbooks:** Each environment has different Satellite servers and different Capsules. The playbooks are identical except they load different variable files.
+
+### Variable Files (group_vars)
+
+The `group_vars` directory contains:
+- `all.yml` - Default (development) settings
+- `test_env.yml` - Test environment overrides
+- `prod_env.yml` - Production environment overrides
+- `ead_env.yml` - EAD environment overrides
+
+**Key variables you'll need to change:**
 
 ```yaml
-# Satellite Configuration
-satellite_version: "6.17"
-satellite_fqdn: "satellite.example.com"
-satellite_org: "EO_ITRA"
-satellite_location: "default_location"
+satellite_fqdn: "satellite.example.com"        # Your Satellite server's name
+capsule_fqdns:                                 # List of Capsule servers
+  - capsule1.example.com
+  - capsule2.example.com
 
-# Capsule Lists
-capsule_fqdns:
-  - devcapsule.example.com
-
-# Load-balanced Capsules (optional)
-loadbalanced_capsules: []
-capsule_loadbalancer_fqdn: ""
-
-# Registration
-capsule_activation_key: "satellite-infrastructure"
-capsule_enable_remote_execution: true
-capsule_setup_insights: false
+loadbalanced_capsules: []                      # Capsules behind a load balancer
+capsule_loadbalancer_fqdn: ""                  # Load balancer's name (if any)
 ```
 
-## Automation Workflow
+**Why variables are environment-specific:** Your test Satellite is different from your production Satellite. Each environment file points to the correct Satellite and lists the correct Capsules for that environment.
 
-### Phase 1: Pre-Registration Cleanup
-**Role:** `prep_capsule_registration`
-- Removes existing katello-ca-consumer packages
-- Cleans subscription-manager state
-- Ensures clean state for registration
+## Load-Balanced Capsules - Special Considerations
 
-### Phase 2: Capsule Registration
-**Role:** `register_capsule`
-- Generates registration command using `redhat.satellite.registration_command`
-- Registers Capsule to Satellite using activation key
-- Verifies registration with `hammer host info`
-- Confirms connectivity to Satellite API
+Some environments put multiple Capsules behind a load balancer for high availability.
 
-### Phase 3: Repository Configuration
-**Role:** `configure_capsule_repos`
-- Disables all repositories
-- Enables only required Capsule repositories
-- Verifies package availability
-
-### Phase 4: Parse Installation Instructions
-**Role:** `parse_install_instructions`
-- Reads installation instruction file
-- Extracts `satellite-installer` command
-- Appends load-balancer options if needed
-- Prepares final installation command
-
-### Phase 5: Capsule Installation
-**Role:** `install_capsule`
-- Executes `satellite-installer` with proper parameters
-- Monitors installation progress (30-60 minutes)
-- Verifies services start correctly:
-  - foreman-proxy
-  - httpd
-  - pulpcore-api
-  - pulpcore-content
-- Confirms Capsule appears in Satellite using `hammer capsule info`
-- Tests Capsule API endpoint
-
-## Load Balancer Support
-
-The automation supports Capsules behind a load balancer:
+**Configuration example:**
 
 ```yaml
-# In group_vars
 capsule_fqdns:
-  - prodcapsule1.example.com
-  - prodcapsule2.example.com
+  - capsule1.example.com
+  - capsule2.example.com
 
 loadbalanced_capsules:
-  - prodcapsule1.example.com
-  - prodcapsule2.example.com
+  - capsule1.example.com
+  - capsule2.example.com
 
-capsule_loadbalancer_fqdn: "capsule.loadbalancer.com"
+capsule_loadbalancer_fqdn: "capsules.example.com"
 ```
 
-**Important:** Load-balanced Capsules require custom SSL certificates with:
-- Capsule FQDN as CN or in SAN
-- Load balancer FQDN in SAN (Subject Alternative Name)
+**CRITICAL:** The certificates for load-balanced Capsules MUST include both:
+- The individual Capsule's FQDN (as CN or SAN)
+- The load balancer's FQDN (in SAN - Subject Alternative Name)
 
-## Verification
+**Why this matters:** Clients connect to "capsules.example.com" (the load balancer), but the actual Capsule behind it is "capsule1.example.com". SSL certificates must be valid for both names or clients will get certificate errors.
 
-### Post-Installation Checks
+## Running the Automation
 
-The automation automatically verifies:
-- ✅ All Capsule services are running
-- ✅ Capsule is registered in Satellite
-- ✅ Capsule API responds on port 9090
-- ✅ Host is properly registered
-
-### Manual Verification
+### Development Environment
 
 ```bash
-# On controller (as root)
-sudo hammer capsule list
-sudo hammer capsule info --name "capsule.example.com"
-
-# On Capsule server
-systemctl status foreman-proxy
-systemctl status httpd
-subscription-manager identity
+ansible-playbook capsule-install.yml --limit capsule.dev.example.com
 ```
 
-## Idempotency
+### Test Environment
 
-The playbooks are fully idempotent and can be safely re-run:
-- Existing registrations are detected and preserved
-- Services already running are left as-is
-- Installation steps are skipped if already completed
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue:** Hammer command not found
 ```bash
-# Solution: Install Hammer CLI
-dnf install -y rubygem-hammer_cli rubygem-hammer_cli_foreman
+ansible-playbook capsule-install-test.yml --limit capsule.test.example.com
 ```
 
-**Issue:** Authentication failed
+### Production Environment (Always Test First!)
+
 ```bash
-# Solution: Verify Hammer configuration
-sudo cat /root/.hammer/cli.modules.d/foreman.yml
-sudo hammer ping
+# Check what would happen (doesn't make changes)
+ansible-playbook capsule-install-prod.yml --check --limit capsule.prod.example.com
+
+# Actually run it
+ansible-playbook capsule-install-prod.yml --limit capsule.prod.example.com
 ```
 
-**Issue:** Certificate files not found
+**Why use --limit:** Your inventory includes both Satellite and Capsules. The `--limit` flag tells Ansible "only run on this specific server right now." This prevents accidentally running on all servers at once.
+
+**Why --check in production:** Check mode shows you what would change without actually changing it. Think of it as a "dry run" that lets you verify the automation will do what you expect.
+
+## Troubleshooting Common Issues
+
+### Problem: "Repository not found" error
+
+**Cause:** The activation key doesn't have the right content view, or Capsule repositories aren't synced in Satellite.
+
+**Fix:** Log into Satellite UI → Content → Activation Keys → satellite-infrastructure → verify it has a content view with Capsule repos.
+
+### Problem: "Certificate tarball not found"
+
+**Cause:** The satellite-install project didn't run successfully, or files weren't distributed to this Capsule.
+
+**Fix:** Verify files exist:
 ```bash
-# Solution: Verify files were distributed
 ls -la /root/capsule_cert/
-# Should contain: <fqdn>-certs.tar and <fqdn>-install.txt
 ```
+If missing, re-run the satellite-install project's certificate distribution role.
 
-**Issue:** Capsule not appearing in Satellite
+### Problem: "Registration failed"
+
+**Cause:** Network connectivity issues between Capsule and Satellite, or Satellite services are down.
+
+**Fix:** Test connectivity:
 ```bash
-# Solution: Check Satellite connectivity and wait longer
-sudo hammer capsule list
-# Installation takes 30-60 minutes
+curl -k https://satellite.example.com/api/status
 ```
+If that fails, check firewall rules and Satellite's service status.
 
-### Debug Mode
+### Problem: Installation hangs
 
-Enable verbose output:
-```yaml
-# In group_vars/all.yml
-capsule_debug_output: true
-save_installation_logs: true
+**Cause:** The installer is still running (normal), or truly stuck (rare).
+
+**Fix:** Check the log file:
+```bash
+tail -f /var/log/capsule-installation/capsule-installer-*.log
 ```
+Look for "Success!" at the end. If you see errors, they'll tell you what failed.
 
-Logs are saved to: `/var/log/capsule-installation/`
+## How This Differs from Manual Installation
 
-## Technical Details
+**Manual installation requires:**
+1. SSHing to each Capsule
+2. Registering with complex subscription-manager commands
+3. Finding and enabling the exact right repositories
+4. Copying certificate files
+5. Extracting and reading installation instructions
+6. Running the installer command (which is long and complex)
+7. Manually verifying services
+8. Logging into Satellite UI to register the Capsule as a Smart Proxy
+9. Repeating for every Capsule
 
-### Hammer CLI Configuration
+**This automation does all of that in one command.** More importantly, it does it consistently. Manual installations lead to inconsistencies - maybe you enabled an extra repository on one server, or forgot a step on another. Automation ensures every Capsule is configured identically.
 
-This automation uses pre-configured Hammer CLI:
-- **No username/password parameters needed** in commands
-- **Root access required** (`become: true`)
+## Understanding Idempotency - Why You Can Run This Multiple Times
 
-Example:
-```yaml
-# Correct pattern for this environment
-- name: Get Capsule info
-  ansible.builtin.command: hammer capsule info --name "{{ name }}"
-  become: true
-  delegate_to: "{{ satellite_fqdn }}"
-```
+This automation is "idempotent," which means you can run it over and over, and it will:
+- Skip steps that are already done
+- Only change what needs changing
+- End with the same result every time
 
-### Authentication Patterns
+**Example:** If registration already succeeded but repository configuration failed, re-running the automation will:
+- Skip the registration step (already done)
+- Retry the repository configuration
+- Continue with the rest of the steps
 
-**Satellite API calls:**
-```yaml
-ansible.builtin.uri:
-  url: "{{ satellite_server_url }}/api/status"
-  user: "{{ satellite_setup_username }}"
-  password: "{{ satellite_initial_admin_password }}"
-  force_basic_auth: true
-```
+**Why this matters:** Real environments are messy. Network hiccups happen. Servers reboot mid-installation. Being able to safely re-run the automation saves hours of manual cleanup.
 
-**Capsule public API (no auth):**
-```yaml
-ansible.builtin.uri:
-  url: "https://{{ capsule_fqdn }}:9090/features"
-  # No authentication needed
-```
+## Technical Notes FYI
 
-### Module Defaults
+### Why We Use Fully Qualified Collection Names (FQCN)
 
-All playbooks use module defaults for `redhat.satellite` collection:
+You'll see modules written as `ansible.builtin.command` instead of just `command`.
+
+**Reason:** Multiple Ansible collections can have modules with the same name. Using FQCN makes it absolutely clear which module you're using. This prevents bugs when collections are updated.
+
+### Why Module Defaults Are Set
+
+At the top of each playbook you'll see:
+
 ```yaml
 module_defaults:
   group/redhat.satellite.satellite:
@@ -304,43 +339,55 @@ module_defaults:
     validate_certs: false
 ```
 
-## Documentation
+**Reason:** Every `redhat.satellite.*` module needs these parameters. Instead of repeating them in every task, we set them once here. This is DRY (Don't Repeat Yourself) programming - change in one place, apply everywhere.
 
-- `capsule_install_primer.md` - Detailed project specifications
-- `CORRECTIONS_SUMMARY.md` - All corrections applied to code
-- `HAMMER_CONFIGURATION_NOTES.md` - Hammer CLI usage guide
-- `URI_AUTHENTICATION_FIX.md` - Authentication requirements
-- `VERIFICATION_COMMANDS_REFERENCE.md` - Testing commands
-- `FINAL_IMPLEMENTATION_GUIDE.md` - Complete deployment guide
+### Why We Use 'when' Conditions on Roles
 
-## Requirements
+Roles are guarded with conditions like:
 
-### Ansible Collections
 ```yaml
-collections:
-  - name: redhat.satellite
-    version: ">=3.0.0"
-  - name: community.general
-    version: ">=6.0.0"
+when:
+  - is_capsule_host
+  - will_install_capsule | default(false)
 ```
 
-### Python Requirements
-- Python 3.9+
-- requests
-- PyYAML
+**Reason:** Your inventory includes both Satellite and Capsule servers. These conditions ensure Capsule roles only run on Capsule servers. Without them, the automation would try to install Capsule software on the Satellite server (which would fail).
 
-## Support
+### Why We Test Both Locally and Remotely
 
-For issues or questions:
-1. Check troubleshooting section above
-2. Review logs in `/var/log/capsule-installation/`
-3. Verify all prerequisites are met
-4. Check Hammer CLI configuration
+After registration, we verify in two places:
+1. On the Capsule: `subscription-manager identity`
+2. On the Satellite: `hammer host info`
 
-## License
+**Reason:** Systems can be "out of sync." The Capsule might think it's registered, but Satellite might not know about it (or vice versa). Testing both sides ensures they agree.
 
-Internal use only - Red Hat Satellite 6.17 automation
+### Why Async Operations Are Used
+
+The installer task uses:
+
+```yaml
+async: 3600
+poll: 30
+```
+
+**Reason:** The installer takes 30-60 minutes. Normally, Ansible waits for tasks to finish. `async` tells Ansible "this will take a long time, keep checking every 30 seconds (poll) for up to 1 hour (async)." Without this, the connection would time out.
+
+## Next Steps After Installation
+
+Once Capsules are installed:
+
+1. **Sync content to Capsules** - In Satellite UI, trigger content syncs so Capsules have packages
+2. **Test client registration** - Register a test client to the Capsule to verify it works
+3. **Configure lifecycle environments** - Assign Capsules to appropriate environments
+4. **Set up content views** - Define which content each Capsule should sync
+
+## Additional Resources
+
+- `capsule_install_primer.md` - Detailed technical specifications
+- `/var/log/capsule-installation/` - Installation logs on each Capsule
+- Hammer CLI reference: `hammer --help`
+- Red Hat Satellite documentation: https://access.redhat.com/documentation/en-us/red_hat_satellite/
 
 ---
 
-**Note:** This automation requires a functioning Satellite server with the satellite-install project completed first.
+**Remember:** This automation is designed to be run repeatedly. If something fails, fix the underlying issue (network, certificates, etc.) and run it again. It should pick up where it left off.
