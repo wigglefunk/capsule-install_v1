@@ -1,0 +1,21 @@
+# ============================================================================
+# PHASE 1.5: COPY TAR TO SATELLITE DEFAULT LOCATION
+# ============================================================================
+# Satellite-generated install commands expect the tar file at /root/
+# We keep our organized structure in /root/capsule_cert/ but the installer
+# command references the default location, so we copy it there for compatibility
+
+- name: Copy certificate tar to Satellite default location
+  ansible.builtin.copy:
+    src: "{{ capsule_cert_base_path }}/{{ inventory_hostname }}-certs.tar"
+    dest: "/root/{{ inventory_hostname }}-certs.tar"
+    owner: root
+    group: root
+    mode: '0644'
+    remote_src: yes
+  register: tar_copy_compat
+
+- name: Report tar file compatibility copy
+  ansible.builtin.debug:
+    msg: "Certificate tar copied to /root/{{ inventory_hostname }}-certs.tar for installer compatibility"
+  when: capsule_debug_output | bool
